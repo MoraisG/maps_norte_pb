@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="pt-PT">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Mapa de Territórios</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <style>
+        body { margin: 0; padding: 0; font-family: sans-serif; }
+        #mapa { height: 100vh; width: 100vw; } /* Ocupa todo o ecrã do telemóvel/computador */
+    </style>
+</head>
+<body>
+    <div id="mapa"></div>
+
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script>
+        // 1. Inicializar o mapa (Coordenadas ajustadas aproximadamente para Pato Branco)
+        const mapa = L.map('mapa').setView([-26.2295, -52.6716], 13);
+
+        // 2. Adicionar a camada visual das ruas (OpenStreetMap)
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            attribution: '© OpenStreetMap'
+        }).addTo(mapa);
+
+        const urlAPI = 'https://script.google.com/macros/s/AKfycbzO3YTeUppLfz46KFa8gnR_harX8ysKqQyOGz9cX5sfEOqQ7W_kDAtB7X4yYCLvWHpk9A/exec'; 
+      
+        // 3. Buscar os dados em tempo real da folha de cálculo
+        fetch(urlAPI)
+            .then(resposta => resposta.json())
+            .then(dadosFolha => {
+                // Criar um dicionário para encontrar os dados rapidamente pelo ID
+                const dadosTerritorios = {};
+                dadosFolha.forEach(item => {
+                    dadosTerritorios[item.id] = item;
+                });
+
+                // 4. Buscar os polígonos (o ficheiro GeoJSON)
+                fetch('territorios.geojson')
+                    .then(resposta => resposta.json())
+                    .then(geojsondata => {
+                        
+                        // Desenhar os polígonos no mapa
+                        L.geoJSON(geojsondata, {
+                            
+                            // Lógica das Cores
+                            style: function (feature) {
+                                // NOTA IMPORTANTE: Verifique qual é o nome exato do campo de ID no seu GeoJSON. 
+                                // Pode ser feature.properties.id, ou feature.properties.NUM_TER
+                                const idTerritorio = feature.properties.id; 
+                                const info = dadosTerritorios[idTerritorio];
+                                
+                                let corDoPoligono = '#a9a9a9'; // Cinzento por defeito (se não tiver dados)
+
+                                if (info) {
+                                    if (info.status === 'DISPONÍVEL') corDoPoligono = '#2ecc71'; // Verde
+                                    else if (info.status === 'OCUPADO') corDoPoligono = '#e74c3c'; // Vermelho
+                                }
+
+                                return {
+                                    color: corDoPoligono,
+                                    weight: 2, // Espessura da borda
+                                    fillOpacity: 0.6 // Transparência
+                                };
+                            },
+                            
+                            // Lógica dos Pop-ups (Balão ao clicar)
+                            onEachFeature: function (feature, layer) {
+                                const idTerritorio = feature.properties.id;
+                                const info = dadosTerritorios[idTerritorio];
+                                
+                                if (info) {
+                                    let conteudoPopup = `<b>Território ${info.id} - ${info.regiao}</b><br><br>`;
+                                    conteudoPopup += `<b>Estado:</b> ${info.status}<br>`;
+                                    
+                                    if (info.status === 'OCUPADO') {
+                                        conteudoPopup += `<b>Dirigente:</b> ${info.dirigente}<br>`;
+                                        conteudoPopup += `<b>Última Ação:</b> ${info.data_atualizacao}<br>`;
+                                    }
+                                    
+                                    layer.bindPopup(conteudoPopup);
+                                }
+                            }
+                        }).addTo(mapa);
+                    })
+                    .catch(erro => console.error('Erro ao carregar o ficheiro GeoJSON:', erro));
+            })
+            .catch(erro => console.error('Erro ao carregar os dados do Google Sheets:', erro));
+    </script>
+</body>
+</html>
