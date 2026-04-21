@@ -47,7 +47,7 @@
                             style: function (feature) {
                                 // NOTA IMPORTANTE: Verifique qual é o nome exato do campo de ID no seu GeoJSON. 
                                 // Pode ser feature.properties.id, ou feature.properties.NUM_TER
-                                const idTerritorio = feature.properties.id; 
+                                const idTerritorio = feature.properties.NUM_TERR; 
                                 const info = dadosTerritorios[idTerritorio];
                                 
                                 let corDoPoligono = '#a9a9a9'; // Cinzento por defeito (se não tiver dados)
@@ -66,7 +66,7 @@
                             
                             // Lógica dos Pop-ups (Balão ao clicar)
                             onEachFeature: function (feature, layer) {
-                                const idTerritorio = feature.properties.id;
+                                const idTerritorio = feature.properties.NUM_TERR;
                                 const info = dadosTerritorios[idTerritorio];
                                 
                                 if (info) {
