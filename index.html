@@ -80,11 +80,10 @@
                                     let conteudoPopup = `<b>Território ${info.id} - ${info.regiao}</b><br><br>`;
                                     conteudoPopup += `<b>Estado:</b> ${info.status}<br>`;
                                     
-                                    if (info.status === 'OCUPADO') {
+                                    if (info.status != 'DISPONÍVEL') {
                                         conteudoPopup += `<b>Dirigente:</b> ${info.dirigente}<br>`;
-                                        conteudoPopup += `<b>Última Ação:</b> ${info.data_atualizacao}<br>`;
                                     }
-                                    
+                                    conteudoPopup += `<b>Última Ação:</b> ${info.data_atualizacao}<br>`;
                                     layer.bindPopup(conteudoPopup);
                                 }
                             }
