@@ -3,11 +3,30 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Mapa de Territórios</title>
+    <title>Mapa de Territórios - Pato Branco</title>
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
     <style>
-        body { margin: 0; padding: 0; font-family: sans-serif; }
-        #mapa { height: 100vh; width: 100vw; } /* Ocupa todo o ecrã do telemóvel/computador */
+        body { margin: 0; padding: 0; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
+        #mapa { height: 100vh; width: 100vw; }
+        
+        /* Legenda do Mapa */
+        .info.legend {
+            padding: 10px;
+            background: white;
+            background: rgba(255,255,255,0.9);
+            box-shadow: 0 0 15px rgba(0,0,0,0.2);
+            border-radius: 5px;
+            line-height: 24px;
+            color: #555;
+        }
+        .info.legend i {
+            width: 18px;
+            height: 18px;
+            float: left;
+            margin-right: 8px;
+            opacity: 0.7;
+            border: 1px solid #999;
+        }
     </style>
 </head>
 <body>
@@ -15,89 +34,111 @@
 
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
     <script>
-        // 1. Inicializar o mapa (Coordenadas ajustadas aproximadamente para Pato Branco)
+        // 1. Configurações Iniciais
         const mapa = L.map('mapa').setView([-26.2295, -52.6716], 13);
+        let camadaGeojson;
+        let territorioSelecionado = null;
 
-        // 2. Adicionar a camada visual das ruas (OpenStreetMap)
         L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
             attribution: '© OpenStreetMap'
         }).addTo(mapa);
 
         const urlAPI = 'https://script.google.com/macros/s/AKfycbzO3YTeUppLfz46KFa8gnR_harX8ysKqQyOGz9cX5sfEOqQ7W_kDAtB7X4yYCLvWHpk9A/exec'; 
-      
-        // 3. Buscar os dados em tempo real da folha de cálculo
+
+        // 2. Função para Definir Cores
+        function obterEstilo(feature, dadosTerritorios) {
+            const id = feature.properties.NUM_TERR;
+            const info = dadosTerritorios[id];
+            let cor = '#a9a9a9'; // Cinza padrão
+
+            if (info && info.status) {
+                const status = info.status.trim().toUpperCase();
+                if (status === 'DISPONÍVEL') cor = '#2ecc71';      // Verde
+                else if (status === 'OCUPADO') cor = '#e67e22';   // Laranja
+                else if (status === 'RECENTE' || status === 'TRABALHADO') cor = '#9b59b6'; // Lilás
+            }
+
+            return {
+                fillColor: cor,
+                weight: 2,
+                opacity: 1,
+                color: 'white',
+                dashArray: '3',
+                fillOpacity: 0.6
+            };
+        }
+
+        // 3. Busca de Dados e Renderização
         fetch(urlAPI)
-            .then(resposta => resposta.json())
+            .then(r => r.json())
             .then(dadosFolha => {
-                // Criar um dicionário para encontrar os dados rapidamente pelo ID
                 const dadosTerritorios = {};
-                dadosFolha.forEach(item => {
-                    dadosTerritorios[item.id] = item;
-                });
+                dadosFolha.forEach(item => { dadosTerritorios[item.id] = item; });
 
-                // 4. Buscar os polígonos (o ficheiro GeoJSON)
                 fetch('territorios_nortpb.geojson')
-                    .then(resposta => resposta.json())
+                    .then(r => r.json())
                     .then(geojsondata => {
-                        
-                        // Desenhar os polígonos no mapa
-                        L.geoJSON(geojsondata, {
-                            
-                            // Lógica das Cores
-                            style: function (feature) {
-                                // NOTA IMPORTANTE: Verifique qual é o nome exato do campo de ID no seu GeoJSON. 
-                                // Pode ser feature.properties.id, ou feature.properties.NUM_TER
-                                const idTerritorio = feature.properties.NUM_TERR; 
-                                const info = dadosTerritorios[idTerritorio];
-                                
-                                let corDoPoligono = '#a9a9a9';
+                        camadaGeojson = L.geoJSON(geojsondata, {
+                            style: (f) => obterEstilo(f, dadosTerritorios),
+                            onEachFeature: (feature, layer) => {
+                                const id = feature.properties.NUM_TERR;
+                                const info = dadosTerritorios[id];
 
-                                if (info && info.status) {
-                                    const statusLimpo = info.status.toString().trim().toUpperCase(); 
-                                    
-                                    if (statusLimpo === 'DISPONÍVEL') {
-                                        corDoPoligono = '#2ecc71'; // Verde
-                                    } else if (statusLimpo === 'OCUPADO') {
-                                        corDoPoligono = '#e67e22'; // Laranja
-                                    } else if (statusLimpo === 'RECENTE' || statusLimpo === 'TRABALHADO') {
-                                        corDoPoligono = '#9b59b6'; // Lilás (Amestista)
+                                // Eventos de Interação (Hover e Clique)
+                                layer.on({
+                                    mouseover: (e) => {
+                                        const l = e.target;
+                                        l.setStyle({ weight: 5, color: '#666', dashArray: '', fillOpacity: 0.8 });
+                                        l.bringToFront();
+                                    },
+                                    mouseout: (e) => {
+                                        if (e.target !== territorioSelecionado) {
+                                            camadaGeojson.resetStyle(e.target);
+                                        }
+                                    },
+                                    click: (e) => {
+                                        if (territorioSelecionado) { camadaGeojson.resetStyle(territorioSelecionado); }
+                                        territorioSelecionado = e.target;
+                                        territorioSelecionado.setStyle({ weight: 5, color: '#000', dashArray: '', fillOpacity: 0.9 });
+                                        mapa.fitBounds(e.target.getBounds());
                                     }
-                                }
+                                });
 
-                                return {
-                                    color: corDoPoligono,
-                                    weight: 2, // Espessura da borda
-                                    fillOpacity: 0.4 // Transparência
-                                };
-                            },
-                            
-                            // Lógica dos Pop-ups (Balão ao clicar)
-                            onEachFeature: function (feature, layer) {
-                                const idTerritorio = feature.properties.NUM_TERR;
-                                const info = dadosTerritorios[idTerritorio];
-                                
+                                // Conteúdo do Popup
                                 if (info) {
-                                    let conteudoPopup = `<b>Território ${info.id} - ${info.regiao}</b><br><br>`;
-                                    conteudoPopup += `<b>Estado:</b> ${info.status}<br>`;
+                                    let popup = `<b>Território ${info.id} - ${info.regiao}</b><br><br>`;
+                                    popup += `<b>Estado:</b> ${info.status}<br>`;
                                     
-                                    if (info.status != 'DISPONÍVEL') {
-                                        conteudoPopup += `<b>Dirigente:</b> ${info.dirigente}<br>`;
+                                    if (info.status !== 'DISPONÍVEL') {
+                                        popup += `<b>Dirigente:</b> ${info.dirigente}<br>`;
                                     }
-                                    let dataFormatada = info.data_atualizacao;
-                                    
-                                    if (dataFormatada && dataFormatada.includes('T')) {
-                                        const partes = dataFormatada.split('T')[0].split('-');
-                                        dataFormatada = `${partes[2]}/${partes[1]}/${partes[0]}`;
+
+                                    let dataBr = info.data_atualizacao;
+                                    if (dataBr && dataBr.includes('T')) {
+                                        const p = dataBr.split('T')[0].split('-');
+                                        dataBr = `${p[2]}/${p[1]}/${p[0]}`;
                                     }
-                                    conteudoPopup += `<b>Última Ação:</b> ${dataFormatada}<br>`;
-                                    layer.bindPopup(conteudoPopup);
+                                    popup += `<b>Última Ação:</b> ${dataBr}`;
+                                    layer.bindPopup(popup);
                                 }
                             }
                         }).addTo(mapa);
-                    })
-                    .catch(erro => console.error('Erro ao carregar o ficheiro GeoJSON:', erro));
-            })
-            .catch(erro => console.error('Erro ao carregar os dados do Google Sheets:', erro));
+                    });
+            });
+
+        // 4. Adicionar Legenda
+        const legenda = L.control({position: 'bottomright'});
+        legenda.onAdd = function () {
+            const div = L.DomUtil.create('div', 'info legend');
+            const labels = ['Disponível', 'Ocupado', 'Recente/Trabalhado'];
+            const cores = ['#2ecc71', '#e67e22', '#9b59b6'];
+            
+            for (let i = 0; i < labels.length; i++) {
+                div.innerHTML += `<i style="background:${cores[i]}"></i> ${labels[i]}<br>`;
+            }
+            return div;
+        };
+        legenda.addTo(mapa);
     </script>
 </body>
 </html>
