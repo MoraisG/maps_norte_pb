@@ -83,7 +83,13 @@
                                     if (info.status != 'DISPONÍVEL') {
                                         conteudoPopup += `<b>Dirigente:</b> ${info.dirigente}<br>`;
                                     }
-                                    conteudoPopup += `<b>Última Ação:</b> ${info.data_atualizacao}<br>`;
+                                    let dataFormatada = info.data_atualizacao;
+                                    
+                                    if (dataFormatada && dataFormatada.includes('T')) {
+                                        const partes = dataFormatada.split('T')[0].split('-');
+                                        dataFormatada = `${partes[2]}/${partes[1]}/${partes[0]}`;
+                                    }
+                                    conteudoPopup += `<b>Última Ação:</b> ${dataFormatada}<br>`;
                                     layer.bindPopup(conteudoPopup);
                                 }
                             }
