@@ -50,11 +50,16 @@
                                 const idTerritorio = feature.properties.NUM_TERR; 
                                 const info = dadosTerritorios[idTerritorio];
                                 
-                                let corDoPoligono = '#a9a9a9'; // Cinzento por defeito (se não tiver dados)
+                                let corDoPoligono = '#a9a9a9';
 
                                 if (info) {
-                                    if (info.status === 'DISPONÍVEL') corDoPoligono = '#2ecc71'; // Verde
-                                    else if (info.status === 'OCUPADO') corDoPoligono = '#e74c3c'; // Vermelho
+                                    const statusLimpo = info.status.toString().trim().toUpperCase();
+                                    
+                                    if (statusLimpo === 'DISPONÍVEL') corDoPoligono = '#2ecc71'; 
+                                        else if (statusLimpo === 'OCUPADO') corDoPoligono = '#e67e22'; 
+                                    } else if (statusLimpo === 'RECENTE' || statusLimpo === 'TRABALHADO') {
+                                        corDoPoligono = '#9b59b6'; 
+                                    }
                                 }
 
                                 return {
