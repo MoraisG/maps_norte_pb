@@ -52,13 +52,15 @@
                                 
                                 let corDoPoligono = '#a9a9a9';
 
-                                if (info) {
-                                    const statusLimpo = info.status.toString().trim().toUpperCase();
+                                if (info && info.status) {
+                                    const statusLimpo = info.status.toString().trim().toUpperCase(); 
                                     
-                                    if (statusLimpo === 'DISPONÍVEL') corDoPoligono = '#2ecc71'; 
-                                        else if (statusLimpo === 'OCUPADO') corDoPoligono = '#e67e22'; 
+                                    if (statusLimpo === 'DISPONÍVEL') {
+                                        corDoPoligono = '#2ecc71'; // Verde
+                                    } else if (statusLimpo === 'OCUPADO') {
+                                        corDoPoligono = '#e67e22'; // Laranja
                                     } else if (statusLimpo === 'RECENTE' || statusLimpo === 'TRABALHADO') {
-                                        corDoPoligono = '#9b59b6'; 
+                                        corDoPoligono = '#9b59b6'; // Lilás (Amestista)
                                     }
                                 }
 
