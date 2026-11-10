@@ -1,0 +1,11 @@
+# Segredos locais e chaves de acesso (NUNCA versionar no Git)
+.env
+.env.local
+.clasprc.json
+.clasp.json
+*service-account*.json
+*credentials*.json
+
+# Dependências locais
+node_modules/
+.env.example
