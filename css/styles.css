@@ -1,0 +1,47 @@
+/* Estilos Customizados PWA Territórios */
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+.no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+.nav-tab {
+  color: #94a3b8;
+  background-color: rgba(15, 23, 42, 0.6);
+  border: 1px solid rgba(51, 65, 85, 0.5);
+}
+.nav-tab:hover {
+  color: #f8fafc;
+  background-color: rgba(30, 41, 59, 0.8);
+}
+.nav-tab.active-tab {
+  color: #ffffff;
+  background-color: #4f46e5;
+  border-color: #6366f1;
+  box-shadow: 0 4px 12px rgba(79, 70, 229, 0.35);
+}
+
+/* Customização de Popups do Leaflet no Tema Escuro */
+.leaflet-popup-content-wrapper,
+.leaflet-popup-tip {
+  background: #0f172a !important;
+  color: #f1f5f9 !important;
+  border: 1px solid #334155;
+  border-radius: 0.75rem !important;
+}
+.leaflet-container {
+  background: #090d16;
+  font-family: inherit;
+}
+.territorio-label-tooltip {
+  background: rgba(15, 23, 42, 0.85) !important;
+  border: 1px solid rgba(148, 163, 184, 0.4) !important;
+  color: #f8fafc !important;
+  font-weight: 700;
+  font-size: 11px;
+  border-radius: 6px;
+  padding: 1px 5px;
+  box-shadow: 0 2px 4px rgba(0,0,0,0.5);
+}
