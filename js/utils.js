@@ -70,6 +70,50 @@ const Utils = {
     return { badgeClass, label };
   },
 
+  /**
+   * Gera dinamicamente a lista de Anos de Serviço (01/09/AAAA até 31/08/AAAA+1)
+   * garantindo suporte a 01/09/2025 até 31/08/2026 e aos anos subsequentes automaticamente.
+   */
+  obterAnosDeServicoDisponiveis() {
+    const hoje = new Date();
+    const anoAtual = hoje.getFullYear();
+    const mesAtual = hoje.getMonth() + 1;
+    const anoInicioVigente = mesAtual >= 9 ? anoAtual : anoAtual - 1;
+    const primeiroAno = 2024;
+    const ultimoAno = Math.max(anoInicioVigente + 1, 2026);
+
+    const lista = [];
+    for (let ano = ultimoAno; ano >= primeiroAno; ano--) {
+      lista.push({
+        anoInicio: ano,
+        anoFim: ano + 1,
+        label: `Ano de Serviço ${ano}/${ano + 1} (01/09/${ano} a 31/08/${ano + 1})`,
+        periodo: `01/09/${ano} a 31/08/${ano + 1}`,
+        vigente: ano === anoInicioVigente
+      });
+    }
+    return lista;
+  },
+
+  /**
+   * Filtra uma lista de ciclos { dirigente, dataDesignacao, dataConclusao } para o Ano de Serviço (01/09/AAAA a 31/08/AAAA+1)
+   */
+  filtrarCiclosPorAnoServico(ciclos, anoInicio) {
+    if (!Array.isArray(ciclos) || !ciclos.length) return [];
+    const inicioTs = new Date(Number(anoInicio), 8, 1, 0, 0, 0, 0).getTime();
+    const fimTs = new Date(Number(anoInicio) + 1, 7, 31, 23, 59, 59, 999).getTime();
+
+    return ciclos.filter(c => {
+      const tsDesig = this.obterTimestampData(c.dataDesignacao);
+      const tsConcl = this.obterTimestampData(c.dataConclusao);
+
+      const desigNoPeriodo = tsDesig >= inicioTs && tsDesig <= fimTs;
+      const conclNoPeriodo = tsConcl >= inicioTs && tsConcl <= fimTs;
+      const emAbertoNoPeriodo = tsDesig > 0 && tsDesig < inicioTs && (!tsConcl || tsConcl >= inicioTs);
+      return desigNoPeriodo || conclNoPeriodo || emAbertoNoPeriodo;
+    });
+  },
+
   mostrarToast(mensagem, tipo = "sucesso") {
     const el = document.getElementById("app-toast");
     if (!el) return;

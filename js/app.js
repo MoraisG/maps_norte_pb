@@ -46,6 +46,17 @@ const App = {
     document.getElementById("filter-status").addEventListener("change", () => this.renderizarCardsTerritorios());
     document.getElementById("filter-tipo").addEventListener("change", () => this.renderizarCardsTerritorios());
 
+    // Eventos do Dashboard de Ocupação e Relatório PDF por Ano de Serviço
+    this.inicializarSeletorAnoServico();
+    const inputDashSearch = document.getElementById("dash-search-ocupados");
+    if (inputDashSearch) {
+      inputDashSearch.addEventListener("input", () => this.renderizarDashboardOcupacao());
+    }
+    const btnGerarPdf = document.getElementById("btn-gerar-pdf-ano-servico");
+    if (btnGerarPdf) {
+      btnGerarPdf.addEventListener("click", () => this.exportarRelatorioPdfAnoServico());
+    }
+
     // Eventos da Modal de Mapa Individual do Território
     const btnCloseModal = document.getElementById("btn-close-modal-mapa");
     const btnFecharModal = document.getElementById("btn-fechar-modal-mapa");
@@ -189,6 +200,8 @@ const App = {
     if (tabId === "tab-mapa") {
       MapaTerritorios.inicializar();
       MapaTerritorios.renderizarPoligonos(this.territorios);
+    } else if (tabId === "tab-dashboard") {
+      this.renderizarDashboardOcupacao();
     } else if (tabId === "tab-historico") {
       this.carregarMeuHistorico();
     } else if (tabId === "tab-admin" && this.usuarioAtual && this.usuarioAtual.perfil === "ADMIN") {
@@ -207,6 +220,7 @@ const App = {
       this.atualizarIndicadores();
       this.renderizarCardsTerritorios();
       this.renderizarMeusTerritorios();
+      this.renderizarDashboardOcupacao();
 
       if (MapaTerritorios.inicializado) {
         MapaTerritorios.renderizarPoligonos(this.territorios);
@@ -277,6 +291,8 @@ const App = {
     document.getElementById("kpi-comigo").textContent = meus;
     document.getElementById("count-all").textContent = this.territorios.length;
     document.getElementById("count-mine").textContent = meus;
+    const badgeOcupNav = document.getElementById("count-ocupados-nav");
+    if (badgeOcupNav) badgeOcupNav.textContent = ocup;
   },
 
   renderizarCardsTerritorios() {
@@ -524,6 +540,506 @@ const App = {
     } catch (err) {
       Utils.mostrarToast(err.message, "erro");
     }
+  },
+
+  /**
+   * ==========================================================================
+   * ITEM 2: DASHBOARD DE TERRITÓRIOS TRABALHADOS / OCUPADOS
+   * ==========================================================================
+   */
+  filtrarDashboardPorDirigente(nomeDirigente) {
+    const input = document.getElementById("dash-search-ocupados");
+    if (!input) return;
+    input.value = input.value === nomeDirigente ? "" : nomeDirigente;
+    this.renderizarDashboardOcupacao();
+  },
+
+  renderizarDashboardOcupacao() {
+    const ocupados = this.territorios
+      .filter(t => t.statusReal === "OCUPADO")
+      .map(t => {
+        const diasEmPosse = Utils.calcularDiasDesdeData(t.ultimaData);
+        return {
+          ...t,
+          diasEmPosse: Number.isFinite(diasEmPosse) ? Math.max(0, diasEmPosse) : 0
+        };
+      })
+      .sort((a, b) => {
+        const tsA = Utils.obterTimestampData(a.ultimaData) || Infinity;
+        const tsB = Utils.obterTimestampData(b.ultimaData) || Infinity;
+        if (tsA !== tsB) return tsA - tsB;
+        return Number(a.numero) - Number(b.numero);
+      });
+
+    // Contabiliza dirigentes únicos e métricas
+    const mapaPorDirigente = {};
+    let somaDias = 0;
+    let qtdAlerta = 0;
+
+    for (const t of ocupados) {
+      const dir = (t.dirigente || "Não informado").trim();
+      mapaPorDirigente[dir] = (mapaPorDirigente[dir] || 0) + 1;
+      somaDias += t.diasEmPosse;
+      if (t.diasEmPosse > 60) qtdAlerta++;
+    }
+
+    const totalDirigentes = Object.keys(mapaPorDirigente).length;
+    const mediaDias = ocupados.length ? Math.round(somaDias / ocupados.length) : 0;
+
+    const elOcup = document.getElementById("dash-kpi-ocupados");
+    const elDir = document.getElementById("dash-kpi-dirigentes");
+    const elMedia = document.getElementById("dash-kpi-media-dias");
+    const elAlerta = document.getElementById("dash-kpi-alerta");
+
+    if (elOcup) elOcup.textContent = `${ocupados.length} / ${this.territorios.length}`;
+    if (elDir) elDir.textContent = String(totalDirigentes);
+    if (elMedia) elMedia.textContent = `${mediaDias} dias`;
+    if (elAlerta) elAlerta.textContent = String(qtdAlerta);
+
+    // Renderiza chips de resumo por dirigente
+    const chipsContainer = document.getElementById("dash-resumo-dirigentes");
+    const buscaAtual = (document.getElementById("dash-search-ocupados")?.value || "").toLowerCase().trim();
+
+    if (chipsContainer) {
+      const entradasDirigentes = Object.entries(mapaPorDirigente).sort((a, b) => b[1] - a[1]);
+      if (!entradasDirigentes.length) {
+        chipsContainer.innerHTML = "";
+      } else {
+        chipsContainer.innerHTML = entradasDirigentes.map(([nome, qtd]) => {
+          const ativo = buscaAtual === nome.toLowerCase();
+          const nomeEscapado = Utils.escapeHtml(nome);
+          const nomeJs = nome.replace(/\\/g, "\\\\").replace(/'/g, "\\'");
+          return `
+            <button type="button" onclick="App.filtrarDashboardPorDirigente('${nomeJs}')"
+              class="px-2.5 py-1 rounded-full text-[11px] font-semibold border transition flex items-center gap-1.5 ${
+                ativo
+                  ? "bg-indigo-600 text-white border-indigo-400"
+                  : "bg-slate-950 text-slate-300 border-slate-800 hover:border-slate-700"
+              }">
+              <span>👤 ${nomeEscapado}</span>
+              <span class="px-1.5 py-0.2 rounded-full text-[10px] bg-slate-800 text-amber-300 font-bold">${qtd}</span>
+            </button>
+          `;
+        }).join("");
+      }
+    }
+
+    // Filtra e renderiza linhas da tabela de ocupados
+    const tbody = document.getElementById("tbody-dash-ocupados");
+    if (!tbody) return;
+
+    const filtrados = ocupados.filter(t => {
+      if (!buscaAtual) return true;
+      const texto = `${t.numero} ${t.bairro} ${t.dirigente || ""} ${t.tipo || ""}`.toLowerCase();
+      return texto.includes(buscaAtual);
+    });
+
+    if (!filtrados.length) {
+      tbody.innerHTML = `
+        <tr>
+          <td colspan="6" class="py-8 px-4 text-center text-slate-400 text-xs">
+            Nenhum território ocupado encontrado para o filtro informado.
+          </td>
+        </tr>`;
+      return;
+    }
+
+    tbody.innerHTML = filtrados.map(t => {
+      let badgeTempoClass = "bg-emerald-500/15 text-emerald-300 border-emerald-500/30";
+      if (t.diasEmPosse > 60) {
+        badgeTempoClass = "bg-rose-500/20 text-rose-300 border-rose-500/40";
+      } else if (t.diasEmPosse >= 30) {
+        badgeTempoClass = "bg-amber-500/20 text-amber-300 border-amber-500/40";
+      }
+
+      const btnMapa = t.wkt
+        ? `<button onclick="MapaTerritorios.abrirModalTerritorio(${Number(t.numero)})" class="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-[11px] font-medium transition">🗺️ Mapa</button>`
+        : "";
+
+      const podeDevolver = t.emMinhaPosse || (this.usuarioAtual && this.usuarioAtual.perfil === "ADMIN");
+      const btnDevolver = podeDevolver
+        ? `<button onclick="App.acaoDevolver(${Number(t.numero)})" class="px-2.5 py-1 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-[11px] font-semibold transition">Devolver</button>`
+        : "";
+
+      return `
+        <tr class="hover:bg-slate-800/40">
+          <td class="py-2.5 px-4">
+            <span class="font-bold text-white">Território ${Number(t.numero)}</span>
+            <span class="block text-[11px] text-slate-400">${Utils.escapeHtml(t.bairro)}</span>
+          </td>
+          <td class="py-2.5 px-4 text-slate-300">${Utils.escapeHtml(t.tipo)}</td>
+          <td class="py-2.5 px-4">
+            <span class="font-semibold text-amber-300">👤 ${Utils.escapeHtml(t.dirigente || "Dirigente")}</span>
+          </td>
+          <td class="py-2.5 px-4 text-slate-300 whitespace-nowrap">${Utils.formatarDataBr(t.ultimaData)}</td>
+          <td class="py-2.5 px-4 whitespace-nowrap">
+            <span class="px-2 py-0.5 rounded-full text-[10px] font-bold border ${badgeTempoClass}">
+              ${t.diasEmPosse} dia(s)
+            </span>
+          </td>
+          <td class="py-2.5 px-4 text-right whitespace-nowrap space-x-1">
+            ${btnMapa}
+            ${btnDevolver}
+          </td>
+        </tr>
+      `;
+    }).join("");
+  },
+
+  /**
+   * ==========================================================================
+   * ITEM 1: RELATÓRIO EM PDF DO REGISTRO DE TERRITÓRIOS POR ANO DE SERVIÇO
+   * (Período: 01/09/AAAA até 31/08/AAAA+1 e assim sucessivamente)
+   * ==========================================================================
+   */
+  inicializarSeletorAnoServico() {
+    const select = document.getElementById("select-ano-servico");
+    if (!select) return;
+
+    const anos = Utils.obterAnosDeServicoDisponiveis();
+    // Seleciona por padrão 2025/2026 (01/09/2025 a 31/08/2026) ou o ano vigente
+    const anoPadrao = anos.find(a => a.vigente) || anos.find(a => a.anoInicio === 2025) || anos[0];
+
+    select.innerHTML = anos.map(a => `
+      <option value="${a.anoInicio}" ${a.anoInicio === anoPadrao.anoInicio ? "selected" : ""}>
+        ${Utils.escapeHtml(a.label)}${a.vigente ? " — Atual" : ""}
+      </option>
+    `).join("");
+  },
+
+  async obterCiclosHistoricosParaRelatorio(anoInicio) {
+    // 1. Se territorios/listar já trouxe 'ciclos' do backend atualizado, usa diretamente
+    const possuiCiclosEmbutidos = this.territorios.some(t => Array.isArray(t.ciclos));
+    if (possuiCiclosEmbutidos) {
+      return [...this.territorios]
+        .sort((a, b) => Number(a.numero) - Number(b.numero))
+        .map(t => ({
+          numero: t.numero,
+          bairro: t.bairro,
+          tipo: t.tipo,
+          ciclos: Utils.filtrarCiclosPorAnoServico(t.ciclos || [], anoInicio)
+        }));
+    }
+
+    // 2. Tenta consultar a rota dedicada 'relatorios/ano-servico'
+    try {
+      const res = await ApiClient.request("relatorios/ano-servico", { anoInicio });
+      if (res && res.relatorio && Array.isArray(res.relatorio.territorios)) {
+        return res.relatorio.territorios;
+      }
+    } catch (e) {}
+
+    // 3. Fallback inteligente caso o backend ainda esteja na versão anterior:
+    // Reconstrói os ciclos a partir do histórico disponível e do estado atual dos territórios
+    let movs = [];
+    try {
+      if (this.usuarioAtual && this.usuarioAtual.perfil === "ADMIN") {
+        const resAdmin = await ApiClient.request("admin/dashboard");
+        movs = resAdmin.historicoRecente || [];
+      } else {
+        const resMinhas = await ApiClient.request("movimentacoes/minhas");
+        movs = resMinhas.historico || [];
+      }
+    } catch (e) {}
+
+    const movsPorTerritorio = {};
+    for (const m of movs) {
+      const num = Number(m.numeroTerritorio);
+      if (!num) continue;
+      if (!movsPorTerritorio[num]) movsPorTerritorio[num] = [];
+      const dataBr = String(m.dataFormatada || "").split(" ")[0];
+      movsPorTerritorio[num].push({
+        timestamp: m.timestamp || Utils.obterTimestampData(dataBr),
+        acao: m.acao,
+        dirigente: m.dirigente || "",
+        dataIso: dataBr
+      });
+    }
+
+    return [...this.territorios]
+      .sort((a, b) => Number(a.numero) - Number(b.numero))
+      .map(t => {
+        const listaMov = (movsPorTerritorio[Number(t.numero)] || []).sort((a, b) => a.timestamp - b.timestamp);
+        const ciclos = [];
+        let aberto = null;
+
+        for (const m of listaMov) {
+          if (m.acao === "Solicitar") {
+            if (aberto) ciclos.push(aberto);
+            aberto = { dirigente: m.dirigente, dataDesignacao: m.dataIso, dataConclusao: "" };
+          } else if (m.acao === "Devolver") {
+            if (aberto) {
+              aberto.dataConclusao = m.dataIso;
+              if (!aberto.dirigente && m.dirigente) aberto.dirigente = m.dirigente;
+              ciclos.push(aberto);
+              aberto = null;
+            } else {
+              ciclos.push({ dirigente: m.dirigente, dataDesignacao: "", dataConclusao: m.dataIso });
+            }
+          }
+        }
+        if (aberto) ciclos.push(aberto);
+
+        // Garante também o último registro consolidado do território caso não estivesse nos logs recentes
+        if (!ciclos.length && t.ultimaData) {
+          if (t.statusReal === "OCUPADO") {
+            ciclos.push({ dirigente: t.dirigente || "Dirigente", dataDesignacao: t.ultimaData, dataConclusao: "" });
+          } else {
+            ciclos.push({ dirigente: t.dirigente || "-", dataDesignacao: "", dataConclusao: t.ultimaData });
+          }
+        }
+
+        return {
+          numero: t.numero,
+          bairro: t.bairro,
+          tipo: t.tipo,
+          ciclos: Utils.filtrarCiclosPorAnoServico(ciclos, anoInicio)
+        };
+      });
+  },
+
+  async exportarRelatorioPdfAnoServico() {
+    const selectAno = document.getElementById("select-ano-servico");
+    const selectEscopo = document.getElementById("select-escopo-relatorio");
+    const anoInicio = Number(selectAno?.value) || 2025;
+    const anoFim = anoInicio + 1;
+    const escopo = selectEscopo?.value || "TODOS";
+    const periodoStr = `01/09/${anoInicio} a 31/08/${anoFim}`;
+
+    Utils.mostrarToast(`Gerando relatório do Ano de Serviço ${periodoStr}...`, "aviso");
+
+    const dadosTerritorios = await this.obterCiclosHistoricosParaRelatorio(anoInicio);
+    const filtrados = escopo === "TRABALHADOS"
+      ? dadosTerritorios.filter(t => t.ciclos && t.ciclos.length > 0)
+      : dadosTerritorios;
+
+    const totalTerritoriosBase = dadosTerritorios.length;
+    const totalTrabalhadosPeriodo = dadosTerritorios.filter(t => t.ciclos && t.ciclos.length > 0).length;
+    const totalDesignacoesPeriodo = dadosTerritorios.reduce((acc, t) => acc + (t.ciclos ? t.ciclos.length : 0), 0);
+    const dataEmissao = new Date().toLocaleString("pt-BR");
+
+    const linhasHtml = filtrados.map(t => {
+      const ciclos = t.ciclos || [];
+      if (!ciclos.length) {
+        return `
+          <tr>
+            <td class="col-num">${Number(t.numero)}</td>
+            <td>${Utils.escapeHtml(t.bairro)}</td>
+            <td>${Utils.escapeHtml(t.tipo)}</td>
+            <td class="sem-reg" colspan="3">Sem registro de trabalho neste Ano de Serviço</td>
+          </tr>
+        `;
+      }
+
+      return ciclos.map((c, idx) => `
+        <tr>
+          ${idx === 0 ? `<td class="col-num" rowspan="${ciclos.length}">${Number(t.numero)}</td>` : ""}
+          ${idx === 0 ? `<td rowspan="${ciclos.length}">${Utils.escapeHtml(t.bairro)}</td>` : ""}
+          ${idx === 0 ? `<td rowspan="${ciclos.length}">${Utils.escapeHtml(t.tipo)}</td>` : ""}
+          <td><strong>${Utils.escapeHtml(c.dirigente || "-")}</strong></td>
+          <td class="col-data">${c.dataDesignacao ? Utils.formatarDataBr(c.dataDesignacao) : "-"}</td>
+          <td class="col-data">${
+            c.dataConclusao
+              ? Utils.formatarDataBr(c.dataConclusao)
+              : `<span class="badge-campo">Em campo</span>`
+          }</td>
+        </tr>
+      `).join("");
+    }).join("");
+
+    const janelaPdf = window.open("", "_blank");
+    if (!janelaPdf) {
+      Utils.mostrarToast("Permita pop-ups no navegador para visualizar e salvar o PDF.", "erro");
+      return;
+    }
+
+    const htmlDocumento = `<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <title>Registro de Designação de Território — Ano de Serviço ${anoInicio}/${anoFim}</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      color: #0f172a;
+      background: #f8fafc;
+      margin: 0;
+      padding: 24px;
+      font-size: 12px;
+    }
+    .toolbar {
+      max-width: 960px;
+      margin: 0 auto 16px auto;
+      background: #0f172a;
+      color: #f8fafc;
+      padding: 12px 16px;
+      border-radius: 10px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+    }
+    .toolbar button {
+      cursor: pointer;
+      border: none;
+      padding: 8px 14px;
+      border-radius: 6px;
+      font-weight: 700;
+      font-size: 12px;
+    }
+    .btn-print { background: #4f46e5; color: #ffffff; }
+    .btn-close { background: #334155; color: #e2e8f0; }
+    .sheet {
+      max-width: 960px;
+      margin: 0 auto;
+      background: #ffffff;
+      padding: 28px;
+      border: 1px solid #cbd5e1;
+      border-radius: 8px;
+    }
+    .header {
+      border-bottom: 2px solid #0f172a;
+      padding-bottom: 12px;
+      margin-bottom: 16px;
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-end;
+    }
+    .header h1 {
+      margin: 0;
+      font-size: 18px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+    .header p {
+      margin: 4px 0 0 0;
+      color: #475569;
+      font-size: 12px;
+    }
+    .kpis {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 10px;
+      margin-bottom: 16px;
+    }
+    .kpi {
+      border: 1px solid #cbd5e1;
+      border-radius: 6px;
+      padding: 8px 12px;
+      background: #f8fafc;
+    }
+    .kpi span { display: block; font-size: 10px; color: #64748b; text-transform: uppercase; }
+    .kpi strong { font-size: 16px; color: #0f172a; }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 11px;
+    }
+    th, td {
+      border: 1px solid #94a3b8;
+      padding: 6px 8px;
+      text-align: left;
+      vertical-align: middle;
+    }
+    th {
+      background: #e2e8f0;
+      font-weight: 700;
+      text-transform: uppercase;
+      font-size: 10px;
+      color: #1e293b;
+    }
+    .col-num { width: 65px; text-align: center; font-weight: 700; }
+    .col-data { width: 110px; text-align: center; }
+    .sem-reg { color: #94a3b8; font-style: italic; text-align: center; }
+    .badge-campo {
+      display: inline-block;
+      padding: 2px 6px;
+      border-radius: 4px;
+      background: #fef3c7;
+      color: #92400e;
+      font-weight: 700;
+      font-size: 10px;
+    }
+    @media print {
+      body { background: #ffffff; padding: 0; }
+      .toolbar { display: none !important; }
+      .sheet { border: none; padding: 0; max-width: 100%; }
+      tr { page-break-inside: avoid; }
+    }
+  </style>
+</head>
+<body>
+  <div class="toolbar">
+    <div>
+      <strong>Relatório Pronto (${periodoStr})</strong> — Clique em "Salvar como PDF / Imprimir" e escolha o destino "Salvar como PDF".
+    </div>
+    <div>
+      <button class="btn-print" onclick="window.print()">🖨️ Salvar como PDF / Imprimir</button>
+      <button class="btn-close" onclick="window.close()">Fechar</button>
+    </div>
+  </div>
+
+  <div class="sheet">
+    <div class="header">
+      <div>
+        <h1>Registro de Designação de Território</h1>
+        <p><strong>Ano de Serviço ${anoInicio}/${anoFim}:</strong> Período de ${periodoStr}</p>
+      </div>
+      <div style="text-align: right; font-size: 11px; color: #475569;">
+        <div>Congregação Norte — Pato Branco</div>
+        <div>Emitido em: ${Utils.escapeHtml(dataEmissao)}</div>
+      </div>
+    </div>
+
+    <div class="kpis">
+      <div class="kpi">
+        <span>Total de Territórios</span>
+        <strong>${totalTerritoriosBase}</strong>
+      </div>
+      <div class="kpi">
+        <span>Trabalhados no Período</span>
+        <strong>${totalTrabalhadosPeriodo} (${totalTerritoriosBase ? Math.round((totalTrabalhadosPeriodo / totalTerritoriosBase) * 100) : 0}%)</strong>
+      </div>
+      <div class="kpi">
+        <span>Sem Trabalho no Período</span>
+        <strong>${totalTerritoriosBase - totalTrabalhadosPeriodo}</strong>
+      </div>
+      <div class="kpi">
+        <span>Designações no Ano de Serviço</span>
+        <strong>${totalDesignacoesPeriodo}</strong>
+      </div>
+    </div>
+
+    <table>
+      <thead>
+        <tr>
+          <th class="col-num">Território</th>
+          <th>Bairro / Descrição</th>
+          <th>Tipo</th>
+          <th>Designado a (Dirigente)</th>
+          <th class="col-data">Data da Designação</th>
+          <th class="col-data">Data da Conclusão</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${linhasHtml}
+      </tbody>
+    </table>
+  </div>
+
+  <script>
+    window.addEventListener("load", () => {
+      setTimeout(() => window.print(), 350);
+    });
+  </script>
+</body>
+</html>`;
+
+    janelaPdf.document.open();
+    janelaPdf.document.write(htmlDocumento);
+    janelaPdf.document.close();
+    Utils.mostrarToast("Relatório PDF gerado com sucesso!", "sucesso");
   }
 };
 
