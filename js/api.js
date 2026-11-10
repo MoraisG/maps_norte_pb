@@ -3,21 +3,15 @@
  * Segue a Camada 3 e 4 do Plano Técnico v2 (Sem credenciais fixas, sessões com expiração e POST text/plain para evitar bloqueio CORS do Apps Script).
  */
 const ApiClient = {
-  // Insira aqui a URL padrão após implantar o Web App, ou configure pela engrenagem na tela inicial
   DEFAULT_API_URL: "https://script.google.com/macros/s/AKfycbwc4E6uP1hPc04h6rECqLgywaxD5KjG5VfhPaTf0d6Tp2_3l_FSaicv4O9Qs3QCad90Jw/exec",
   DEFAULT_GOOGLE_CLIENT_ID: "917012478113-2nq9p3io8j8cao95gscamjh0jqrp6u4p.apps.googleusercontent.com",
 
   getApiUrl() {
-    return localStorage.getItem("CFG_GAS_API_URL") || this.DEFAULT_API_URL;
+    return this.DEFAULT_API_URL;
   },
 
   getClientId() {
-    return localStorage.getItem("CFG_GOOGLE_CLIENT_ID") || this.DEFAULT_GOOGLE_CLIENT_ID;
-  },
-
-  salvarConfigConexao(apiUrl, clientId) {
-    if (apiUrl) localStorage.setItem("CFG_GAS_API_URL", apiUrl.trim());
-    if (clientId) localStorage.setItem("CFG_GOOGLE_CLIENT_ID", clientId.trim());
+    return this.DEFAULT_GOOGLE_CLIENT_ID;
   },
 
   // Sessão armazenada apenas em sessionStorage (expira ao fechar o navegador ou pelo TTL do servidor)

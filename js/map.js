@@ -7,6 +7,10 @@ const MapaTerritorios = {
   layerGroup: null,
   inicializado: false,
 
+  modalMap: null,
+  modalLayerGroup: null,
+  modalInicializado: false,
+
   inicializar() {
     if (this.inicializado) {
       setTimeout(() => this.map.invalidateSize(), 150);
@@ -27,6 +31,27 @@ const MapaTerritorios = {
 
     this.layerGroup = L.featureGroup().addTo(this.map);
     this.inicializado = true;
+  },
+
+  inicializarModal() {
+    if (this.modalInicializado) {
+      setTimeout(() => this.modalMap.invalidateSize(), 100);
+      return;
+    }
+
+    this.modalMap = L.map("modal-map-container", {
+      center: [-26.2285, -52.6715],
+      zoom: 15,
+      zoomControl: true
+    });
+
+    L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+      maxZoom: 19,
+      attribution: "&copy; OpenStreetMap | Gestão de Territórios"
+    }).addTo(this.modalMap);
+
+    this.modalLayerGroup = L.featureGroup().addTo(this.modalMap);
+    this.modalInicializado = true;
   },
 
   renderizarPoligonos(territorios) {
@@ -58,13 +83,15 @@ const MapaTerritorios = {
 
       const dirInfo = t.statusReal === "OCUPADO"
         ? `<p class="text-xs text-amber-300 mt-1">👤 Com: <strong>${Utils.escapeHtml(t.dirigente || "Dirigente")}</strong></p>`
-        : `<p class="text-xs text-slate-400 mt-1">Última data: ${Utils.formatarDataBr(t.ultimaData)}</p>`;
+        : `<p class="text-xs text-slate-400 mt-1">Última devolução: ${Utils.formatarDataBr(t.ultimaData)}</p>`;
 
       let botaoAcaoHtml = "";
-      if (t.statusReal !== "OCUPADO") {
+      if (App.podeSolicitarTerritorio(t)) {
         botaoAcaoHtml = `<button onclick="App.acaoSolicitar(${Number(t.numero)})" class="mt-2.5 w-full py-1.5 px-3 bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs rounded-lg">Solicitar Território ${Number(t.numero)}</button>`;
-      } else if (t.emMinhaPosse || (App.usuarioAtual && App.usuarioAtual.perfil === "ADMIN")) {
+      } else if (t.statusReal === "OCUPADO" && (t.emMinhaPosse || (App.usuarioAtual && App.usuarioAtual.perfil === "ADMIN"))) {
         botaoAcaoHtml = `<button onclick="App.acaoDevolver(${Number(t.numero)})" class="mt-2.5 w-full py-1.5 px-3 bg-indigo-600 hover:bg-indigo-500 text-white font-bold text-xs rounded-lg">Devolver Território ${Number(t.numero)}</button>`;
+      } else if (t.statusReal === "RECENTE") {
+        botaoAcaoHtml = `<button disabled class="mt-2.5 w-full py-1.5 px-3 bg-slate-800 text-slate-500 font-bold text-xs rounded-lg cursor-not-allowed">Indisponível (&le; 120 dias)</button>`;
       }
 
       const popupHtml = `
@@ -93,17 +120,100 @@ const MapaTerritorios = {
     }
   },
 
+  /**
+   * Abre modal exibindo exclusivamente o mapa do território selecionado
+   */
+  abrirModalTerritorio(numero) {
+    const t = App.territorios.find(item => Number(item.numero) === Number(numero));
+    if (!t || !t.wkt) {
+      Utils.mostrarToast("Geometria do mapa não disponível para este território.", "aviso");
+      return;
+    }
+
+    const aneis = Utils.parseWktParaPoligonosLeaflet(t.wkt);
+    if (!aneis.length) {
+      Utils.mostrarToast("Polígono inválido para este território.", "erro");
+      return;
+    }
+
+    const modal = document.getElementById("modal-mapa-territorio");
+    if (!modal) return;
+
+    // Preenche informações de cabeçalho da modal
+    document.getElementById("modal-mapa-tipo").textContent = t.tipo || "Cidade";
+    document.getElementById("modal-mapa-titulo").textContent = `Território ${Number(t.numero)} — ${t.bairro}`;
+
+    const { badgeClass, label } = Utils.obterEstiloStatus(t);
+    const statusBadge = document.getElementById("modal-mapa-status");
+    statusBadge.className = `px-2.5 py-0.5 text-[10px] font-bold rounded-full border ${badgeClass}`;
+    statusBadge.textContent = label;
+
+    const subtituloEl = document.getElementById("modal-mapa-subtitulo");
+    if (t.statusReal === "OCUPADO") {
+      subtituloEl.textContent = `👤 Em posse de: ${t.dirigente || "Dirigente"} desde ${Utils.formatarDataBr(t.ultimaData)}`;
+    } else {
+      subtituloEl.textContent = `📅 Última devolução: ${Utils.formatarDataBr(t.ultimaData)}`;
+    }
+
+    // Botão de ação no rodapé da modal
+    const acoesEl = document.getElementById("modal-mapa-acoes");
+    if (App.podeSolicitarTerritorio(t)) {
+      acoesEl.innerHTML = `
+        <button onclick="MapaTerritorios.fecharModalTerritorio(); App.acaoSolicitar(${Number(t.numero)});" class="px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-semibold text-xs transition">
+          Solicitar Território ${Number(t.numero)}
+        </button>`;
+    } else if (t.statusReal === "OCUPADO" && (t.emMinhaPosse || (App.usuarioAtual && App.usuarioAtual.perfil === "ADMIN"))) {
+      acoesEl.innerHTML = `
+        <button onclick="MapaTerritorios.fecharModalTerritorio(); App.acaoDevolver(${Number(t.numero)});" class="px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white font-semibold text-xs transition">
+          Devolver Território ${Number(t.numero)}
+        </button>`;
+    } else if (t.statusReal === "RECENTE") {
+      acoesEl.innerHTML = `<span class="text-xs text-sky-300">⏳ Disponível para solicitação apenas após mais de 120 dias da última devolução.</span>`;
+    } else {
+      acoesEl.innerHTML = "";
+    }
+
+    modal.classList.remove("hidden");
+    modal.classList.add("flex");
+
+    this.inicializarModal();
+    this.modalLayerGroup.clearLayers();
+
+    const cor = this.obterCorStatus(t);
+    const poly = L.polygon(aneis, {
+      color: cor.borda,
+      weight: 3,
+      fillColor: cor.preenchimento,
+      fillOpacity: 0.4
+    });
+
+    poly.bindTooltip(`Território ${Number(t.numero)} — ${Utils.escapeHtml(t.bairro)}`, {
+      permanent: true,
+      direction: "center",
+      className: "territorio-label-tooltip"
+    });
+
+    this.modalLayerGroup.addLayer(poly);
+
+    clearTimeout(this._modalTimer);
+    this._modalTimer = setTimeout(() => {
+      this.modalMap.invalidateSize();
+      try {
+        this.modalMap.fitBounds(poly.getBounds(), { maxZoom: 17, padding: [35, 35] });
+      } catch (e) {}
+    }, 150);
+  },
+
+  fecharModalTerritorio() {
+    clearTimeout(this._modalTimer);
+    const modal = document.getElementById("modal-mapa-territorio");
+    if (!modal) return;
+    modal.classList.add("hidden");
+    modal.classList.remove("flex");
+  },
+
   focarTerritorio(numero) {
-    App.alternarAba("tab-mapa");
-    setTimeout(() => {
-      this.layerGroup.eachLayer(layer => {
-        const tooltip = layer.getTooltip();
-        if (tooltip && String(tooltip.getContent()).trim() === String(numero)) {
-          this.map.fitBounds(layer.getBounds(), { maxZoom: 17, padding: [40, 40] });
-          layer.openPopup();
-        }
-      });
-    }, 250);
+    this.abrirModalTerritorio(numero);
   },
 
   obterCorStatus(t) {

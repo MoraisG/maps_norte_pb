@@ -9,7 +9,6 @@ const App = {
   init() {
     this.registrarServiceWorker();
     this.configurarEventosUI();
-    this.carregarConfigIniciais();
 
     // Verifica se já existe sessão ativa válida no sessionStorage
     const token = ApiClient.obterTokenSessao();
@@ -32,26 +31,7 @@ const App = {
     }
   },
 
-  carregarConfigIniciais() {
-    document.getElementById("input-api-url").value = ApiClient.getApiUrl();
-    document.getElementById("input-client-id").value = ApiClient.getClientId();
-  },
-
   configurarEventosUI() {
-    // Setup Panel Toggle
-    document.getElementById("btn-toggle-setup").addEventListener("click", () => {
-      const panel = document.getElementById("setup-panel");
-      panel.classList.toggle("hidden");
-    });
-
-    document.getElementById("btn-save-setup").addEventListener("click", () => {
-      const url = document.getElementById("input-api-url").value;
-      const cid = document.getElementById("input-client-id").value;
-      ApiClient.salvarConfigConexao(url, cid);
-      Utils.mostrarToast("Configurações salvas! Inicializando Google Login...", "sucesso");
-      this.inicializarBotaoGoogle();
-    });
-
     // Logout e Refresh
     document.getElementById("btn-logout").addEventListener("click", () => this.executarLogout());
     document.getElementById("btn-refresh").addEventListener("click", () => this.sincronizarDados());
@@ -65,6 +45,26 @@ const App = {
     document.getElementById("filter-search").addEventListener("input", () => this.renderizarCardsTerritorios());
     document.getElementById("filter-status").addEventListener("change", () => this.renderizarCardsTerritorios());
     document.getElementById("filter-tipo").addEventListener("change", () => this.renderizarCardsTerritorios());
+
+    // Eventos da Modal de Mapa Individual do Território
+    const btnCloseModal = document.getElementById("btn-close-modal-mapa");
+    const btnFecharModal = document.getElementById("btn-fechar-modal-mapa");
+    const modalMapa = document.getElementById("modal-mapa-territorio");
+
+    if (btnCloseModal) {
+      btnCloseModal.addEventListener("click", () => MapaTerritorios.fecharModalTerritorio());
+    }
+    if (btnFecharModal) {
+      btnFecharModal.addEventListener("click", () => MapaTerritorios.fecharModalTerritorio());
+    }
+    if (modalMapa) {
+      modalMapa.addEventListener("click", e => {
+        if (e.target === modalMapa) MapaTerritorios.fecharModalTerritorio();
+      });
+    }
+    document.addEventListener("keydown", e => {
+      if (e.key === "Escape") MapaTerritorios.fecharModalTerritorio();
+    });
 
     // Eventos exclusivos do Painel Admin
     document.getElementById("form-admin-usuario").addEventListener("submit", e => {
@@ -85,10 +85,9 @@ const App = {
 
     if (!clientId) {
       container.innerHTML = `
-        <p class="text-xs text-amber-300 bg-amber-950/50 border border-amber-700/50 px-3.5 py-2.5 rounded-xl">
-          Abra <strong>⚙️ Configuração da Conexão</strong> abaixo e informe a URL do Web App (Apps Script) e o seu <strong>Google Client ID</strong> para habilitar o botão oficial de Login com Google.
+        <p class="text-xs text-rose-300 bg-rose-950/50 border border-rose-700/50 px-3.5 py-2.5 rounded-xl">
+          Serviço de autenticação indisponível no momento. Contate o administrador.
         </p>`;
-      document.getElementById("setup-panel").classList.remove("hidden");
       return;
     }
 
@@ -198,10 +197,13 @@ const App = {
   },
 
   async sincronizarDados() {
+    if (this.sincronizando) return;
+    this.sincronizando = true;
     try {
       Utils.mostrarToast("Sincronizando territórios com a planilha...", "aviso");
       const res = await ApiClient.request("territorios/listar");
-      this.territorios = res.territorios || [];
+      const listaBruta = res.territorios || [];
+      this.territorios = this.ordenarPorAntiguidade(this.normalizarTerritorios(listaBruta));
       this.atualizarIndicadores();
       this.renderizarCardsTerritorios();
       this.renderizarMeusTerritorios();
@@ -212,7 +214,55 @@ const App = {
       Utils.mostrarToast("Dados atualizados com sucesso!", "sucesso");
     } catch (err) {
       Utils.mostrarToast(err.message, "erro");
+    } finally {
+      this.sincronizando = false;
     }
+  },
+
+  /**
+   * Normaliza o status de cada território garantindo que somente fique DISPONÍVEL
+   * quando tiver mais de 120 dias desde a última devolução (ou nunca trabalhado).
+   */
+  normalizarTerritorios(lista) {
+    return lista.map(t => {
+      const copia = { ...t };
+      if (copia.statusReal !== "OCUPADO") {
+        const dias = Utils.calcularDiasDesdeData(copia.ultimaData);
+        copia.diasDesdeDevolucao = dias;
+        copia.statusReal = dias > Utils.DIAS_QUARENTENA_DEVOLUCAO ? "DISPONÍVEL" : "RECENTE";
+      } else {
+        copia.diasDesdeDevolucao = 0;
+      }
+      return copia;
+    });
+  },
+
+  /**
+   * Verifica se o território cumpre o requisito de mais de 120 dias desde a última devolução
+   */
+  podeSolicitarTerritorio(t) {
+    if (!t || t.statusReal === "OCUPADO") return false;
+    const dias = Utils.calcularDiasDesdeData(t.ultimaData);
+    return dias > Utils.DIAS_QUARENTENA_DEVOLUCAO && t.statusReal === "DISPONÍVEL";
+  },
+
+  /**
+   * Ordena sempre pelo critério de antiguidade:
+   * 1. Territórios nunca trabalhados ou devolvidos há mais tempo primeiro
+   * 2. Territórios atualmente ocupados ao final
+   */
+  ordenarPorAntiguidade(lista) {
+    return [...lista].sort((a, b) => {
+      const aOcupado = a.statusReal === "OCUPADO" ? 1 : 0;
+      const bOcupado = b.statusReal === "OCUPADO" ? 1 : 0;
+      if (aOcupado !== bOcupado) return aOcupado - bOcupado;
+
+      const tsA = Utils.obterTimestampData(a.ultimaData);
+      const tsB = Utils.obterTimestampData(b.ultimaData);
+      if (tsA !== tsB) return tsA - tsB;
+
+      return Number(a.numero) - Number(b.numero);
+    });
   },
 
   atualizarIndicadores() {
@@ -234,15 +284,17 @@ const App = {
     const filtroStatus = document.getElementById("filter-status").value;
     const filtroTipo = document.getElementById("filter-tipo").value;
 
-    const filtrados = this.territorios.filter(t => {
-      if (filtroStatus !== "TODOS" && t.statusReal !== filtroStatus) return false;
-      if (filtroTipo !== "TODOS" && t.tipo !== filtroTipo) return false;
-      if (busca) {
-        const texto = `${t.numero} ${t.bairro} ${t.dirigente || ""}`.toLowerCase();
-        if (!texto.includes(busca)) return false;
-      }
-      return true;
-    });
+    const filtrados = this.ordenarPorAntiguidade(
+      this.territorios.filter(t => {
+        if (filtroStatus !== "TODOS" && t.statusReal !== filtroStatus) return false;
+        if (filtroTipo !== "TODOS" && t.tipo !== filtroTipo) return false;
+        if (busca) {
+          const texto = `${t.numero} ${t.bairro} ${t.dirigente || ""}`.toLowerCase();
+          if (!texto.includes(busca)) return false;
+        }
+        return true;
+      })
+    );
 
     const container = document.getElementById("grid-territorios");
     if (!filtrados.length) {
@@ -270,27 +322,27 @@ const App = {
   },
 
   criarHtmlCardTerritorio(t) {
-    let badgeClass = "bg-emerald-500/15 text-emerald-300 border-emerald-500/30";
-    if (t.statusReal === "OCUPADO") badgeClass = "bg-amber-500/15 text-amber-300 border-amber-500/30";
-    if (t.statusReal === "RECENTE") badgeClass = "bg-sky-500/15 text-sky-300 border-sky-500/30";
-    if (t.emMinhaPosse) badgeClass = "bg-indigo-500/20 text-indigo-300 border-indigo-500/40";
-
-    const statusLabel = t.emMinhaPosse ? "COM VOCÊ" : t.statusReal;
+    const { badgeClass, label: statusLabel } = Utils.obterEstiloStatus(t);
 
     const infoPosse = t.statusReal === "OCUPADO"
       ? `<p class="text-xs text-amber-300/90 mt-2">👤 Em posse de: <strong>${Utils.escapeHtml(t.dirigente || "Dirigente")}</strong> desde ${Utils.formatarDataBr(t.ultimaData)}</p>`
       : `<p class="text-xs text-slate-400 mt-2">📅 Última devolução: ${Utils.formatarDataBr(t.ultimaData)}</p>`;
 
     let btnPrincipal = "";
-    if (t.statusReal !== "OCUPADO") {
+    if (this.podeSolicitarTerritorio(t)) {
       btnPrincipal = `
         <button onclick="App.acaoSolicitar(${Number(t.numero)})" class="flex-1 py-2 px-3 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-semibold text-xs transition">
           Solicitar
         </button>`;
-    } else if (t.emMinhaPosse || (this.usuarioAtual && this.usuarioAtual.perfil === "ADMIN")) {
+    } else if (t.statusReal === "OCUPADO" && (t.emMinhaPosse || (this.usuarioAtual && this.usuarioAtual.perfil === "ADMIN"))) {
       btnPrincipal = `
         <button onclick="App.acaoDevolver(${Number(t.numero)})" class="flex-1 py-2 px-3 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white font-semibold text-xs transition">
           Devolver
+        </button>`;
+    } else if (t.statusReal === "RECENTE") {
+      btnPrincipal = `
+        <button disabled title="Disponível somente após mais de 120 dias da última devolução" class="flex-1 py-2 px-3 rounded-lg bg-slate-800 text-slate-500 font-semibold text-xs cursor-not-allowed">
+          Indisponível (&le; 120 dias)
         </button>`;
     } else {
       btnPrincipal = `
@@ -300,7 +352,7 @@ const App = {
     }
 
     const btnMapa = t.wkt
-      ? `<button onclick="MapaTerritorios.focarTerritorio(${Number(t.numero)})" class="py-2 px-3 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-medium transition" title="Ver polígono no mapa">🗺️ Mapa</button>`
+      ? `<button onclick="MapaTerritorios.abrirModalTerritorio(${Number(t.numero)})" class="py-2 px-3 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-medium transition" title="Visualizar mapa deste território">🗺️ Mapa</button>`
       : "";
 
     return `
@@ -326,6 +378,11 @@ const App = {
   },
 
   async acaoSolicitar(numero) {
+    const t = this.territorios.find(item => Number(item.numero) === Number(numero));
+    if (!this.podeSolicitarTerritorio(t)) {
+      Utils.mostrarToast("Este território só pode ficar disponível para solicitação quando tiver mais de 120 dias desde a sua última devolução.", "erro");
+      return;
+    }
     if (!confirm(`Confirmar solicitação do Território ${numero}?`)) return;
     try {
       Utils.mostrarToast(`Registrando solicitação do território ${numero}...`, "aviso");

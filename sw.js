@@ -2,7 +2,7 @@
  * Service Worker — Cache exclusivamente de ativos estáticos de interface (Seção 20 do Plano Técnico v2)
  * NENHUM dado sensível ou resposta da API é armazenado em cache offline.
  */
-const CACHE_NAME = "territorios-pwa-shell-v2";
+const CACHE_NAME = "territorios-pwa-shell-v3";
 const STATIC_ASSETS = [
   "./",
   "./index.html",
