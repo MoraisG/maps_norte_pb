@@ -31,8 +31,28 @@ const App = {
   },
 
   registrarServiceWorker() {
+    // Limpa caches legados de versões anteriores para evitar que o F5 volte ao sistema antigo
+    if ("caches" in window) {
+      caches.keys().then(keys => {
+        keys.forEach(k => {
+          if (k !== "territorios-pwa-shell-v7") {
+            caches.delete(k).catch(() => {});
+          }
+        });
+      }).catch(() => {});
+    }
+
     if ("serviceWorker" in navigator) {
-      navigator.serviceWorker.register("sw.js").catch(() => {});
+      navigator.serviceWorker.getRegistrations().then(regs => {
+        regs.forEach(r => r.update().catch(() => {}));
+      }).catch(() => {});
+
+      navigator.serviceWorker
+        .register("sw.js", { updateViaCache: "none" })
+        .then(reg => {
+          reg.update().catch(() => {});
+        })
+        .catch(() => {});
     }
   },
 
@@ -44,24 +64,28 @@ const App = {
       btn.addEventListener("click", () => this.alternarAba(btn.dataset.tab));
     });
 
-    document.getElementById("filter-search").addEventListener("input", () => this.renderizarCardsTerritorios());
-    document.getElementById("filter-status").addEventListener("change", () => {
+    document.getElementById("filter-search")?.addEventListener("input", () => this.renderizarCardsTerritorios());
+    document.getElementById("filter-status")?.addEventListener("change", () => {
       this.limparSelecaoLote();
       this.renderizarCardsTerritorios();
     });
-    document.getElementById("filter-tipo").addEventListener("change", () => {
+    document.getElementById("filter-tipo")?.addEventListener("change", () => {
       this.limparSelecaoLote();
       this.renderizarCardsTerritorios();
     });
 
-    // Barra flutuante de seleção em lote (até 3 de 5)
+    // Botão Solicitar na aba Solicitar e barra flutuante de seleção em lote (até 3 de 5)
     const btnLimparSel = document.getElementById("btn-limpar-selecao");
     const btnSolicitarLote = document.getElementById("btn-solicitar-lote");
+    const btnSolicitarAba = document.getElementById("btn-solicitar-aba");
     if (btnLimparSel) {
       btnLimparSel.addEventListener("click", () => this.limparSelecaoLote());
     }
     if (btnSolicitarLote) {
       btnSolicitarLote.addEventListener("click", () => this.acaoSolicitarLote());
+    }
+    if (btnSolicitarAba) {
+      btnSolicitarAba.addEventListener("click", () => this.acaoSolicitarLote());
     }
 
     // Dashboard e Relatório S-13
@@ -290,6 +314,9 @@ const App = {
   normalizarTerritorios(lista) {
     return lista.map(t => {
       const copia = { ...t };
+      if (!Array.isArray(copia.predios) || copia.predios.length === 0) {
+        copia.predios = Utils.obterPrediosPadraoTerritorio(copia.numero);
+      }
       if (copia.statusReal !== "OCUPADO") {
         const dias = Utils.calcularDiasDesdeData(copia.ultimaData);
         copia.diasDesdeDevolucao = dias;
@@ -302,7 +329,7 @@ const App = {
   },
 
   /**
-   * Retorna os 5 territórios mais antigos atualmente disponíveis para solicitação (Regra da Fila Top 5)
+   * Retorna estritamente os 5 territórios mais antigos atualmente disponíveis para solicitação (Regra da Fila Top 5)
    */
   obterFilaCincoDisponiveis(filtroTipoOpcional) {
     const filtroTipo = filtroTipoOpcional || (document.getElementById("filter-tipo")?.value || "TODOS");
@@ -311,27 +338,35 @@ const App = {
         if (t.statusReal !== "DISPONÍVEL") return false;
         const dias = Utils.calcularDiasDesdeData(t.ultimaData);
         if (dias <= Utils.DIAS_QUARENTENA_DEVOLUCAO) return false;
+        if (filtroTipo === "COM_PREDIOS") {
+          return Array.isArray(t.predios) && t.predios.length > 0;
+        }
         if (filtroTipo !== "TODOS" && t.tipo !== filtroTipo) return false;
         return true;
       })
     );
-    return disponiveisOrdenados.slice(0, Utils.LIMITE_FILA_EXIBICAO);
+    return disponiveisOrdenados.slice(0, Utils.LIMITE_FILA_EXIBICAO || 5);
+  },
+
+  filtrarFilaComPredios() {
+    const sel = document.getElementById("filter-tipo");
+    if (sel) {
+      sel.value = "COM_PREDIOS";
+      this.limparSelecaoLote();
+      this.renderizarCardsTerritorios();
+    }
   },
 
   /**
    * Verifica se o território pode ser solicitado:
    * - Deve estar DISPONÍVEL (> 120 dias)
-   * - Para publicadores (ou modo Fila Top 5), deve constar nos 5 primeiros da fila de antiguidade
+   * - Deve constar nos 5 primeiros da fila de antiguidade
    */
   podeSolicitarTerritorio(t) {
     if (!t || t.statusReal === "OCUPADO") return false;
     const dias = Utils.calcularDiasDesdeData(t.ultimaData);
     if (dias <= Utils.DIAS_QUARENTENA_DEVOLUCAO || t.statusReal !== "DISPONÍVEL") return false;
 
-    const modoStatus = document.getElementById("filter-status")?.value || "FILA_5";
-    if (this.usuarioAtual && this.usuarioAtual.perfil === "ADMIN" && modoStatus !== "FILA_5") {
-      return true;
-    }
     const fila5 = this.obterFilaCincoDisponiveis();
     return fila5.some(item => Number(item.numero) === Number(t.numero));
   },
@@ -394,8 +429,20 @@ const App = {
     if (badgeTop) {
       badgeTop.textContent = `${qtd} de ${Utils.LIMITE_SELECAO_LOTE} selecionados`;
       badgeTop.className = qtd > 0
-        ? "px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-[#0b57d0] text-white"
-        : "px-2.5 py-0.5 rounded-full text-[11px] font-semibold bg-slate-100 text-slate-700";
+        ? "px-2.5 py-1 rounded-full text-[11px] font-bold bg-[#0b57d0] text-white"
+        : "px-2.5 py-1 rounded-full text-[11px] font-semibold bg-slate-100 text-slate-700";
+    }
+
+    const btnSolicitarAba = document.getElementById("btn-solicitar-aba");
+    const labelSolicitarAba = document.getElementById("btn-solicitar-aba-label");
+    if (btnSolicitarAba) {
+      btnSolicitarAba.disabled = qtd === 0;
+    }
+    if (labelSolicitarAba) {
+      const nums = Array.from(this.territoriosSelecionados).sort((a, b) => a - b);
+      labelSolicitarAba.textContent = qtd > 0
+        ? `📌 Solicitar Selecionados (${qtd}/${Utils.LIMITE_SELECAO_LOTE}): ${nums.map(n => `T-${n}`).join(", ")}`
+        : `📌 Solicitar Selecionados (0/${Utils.LIMITE_SELECAO_LOTE})`;
     }
 
     const bar = document.getElementById("floating-selection-bar");
@@ -413,37 +460,21 @@ const App = {
     document.getElementById("floating-selection-label").textContent =
       `${qtd} de ${Utils.LIMITE_SELECAO_LOTE} território(s): ${nums.map(n => `T-${n}`).join(", ")}`;
     document.getElementById("floating-selection-sub").textContent =
-      `Reserva protegida contra concorrência`;
+      `Clique em "Solicitar Selecionados" para confirmar`;
 
     bar.classList.remove("hidden");
     bar.classList.add("flex");
   },
 
   renderizarCardsTerritorios() {
-    const busca = (document.getElementById("filter-search")?.value || "").toLowerCase().trim();
-    const filtroStatus = document.getElementById("filter-status")?.value || "FILA_5";
     const filtroTipo = document.getElementById("filter-tipo")?.value || "TODOS";
 
+    // Regra de negócio estrita: exibe sempre apenas os 5 territórios mais antigos disponíveis na fila
     const fila5 = this.obterFilaCincoDisponiveis(filtroTipo);
     const fila5MapPosicao = new Map();
     fila5.forEach((t, idx) => fila5MapPosicao.set(Number(t.numero), idx + 1));
 
-    let listaExibicao = [];
-    if (filtroStatus === "FILA_5" || !this.usuarioAtual || this.usuarioAtual.perfil !== "ADMIN") {
-      listaExibicao = fila5;
-    } else {
-      listaExibicao = this.ordenarPorAntiguidade(
-        this.territorios.filter(t => {
-          if (filtroStatus !== "TODOS" && t.statusReal !== filtroStatus) return false;
-          if (filtroTipo !== "TODOS" && t.tipo !== filtroTipo) return false;
-          if (busca) {
-            const texto = `${t.numero} ${t.bairro} ${t.dirigente || ""}`.toLowerCase();
-            if (!texto.includes(busca)) return false;
-          }
-          return true;
-        })
-      );
-    }
+    const listaExibicao = fila5;
 
     const container = document.getElementById("grid-territorios");
     if (!listaExibicao.length) {
@@ -467,7 +498,7 @@ const App = {
       container.innerHTML = `
         <div class="col-span-full bg-white border border-slate-200 rounded-2xl p-8 text-center">
           <p class="text-sm font-bold text-slate-800">Você não possui cartões de território em sua posse no momento.</p>
-          <p class="text-xs text-slate-500 mt-1">Acesse a aba "Solicitar" para escolher até 3 dos 5 territórios da fila de antiguidade.</p>
+          <p class="text-xs text-slate-500 mt-1">Acesse a aba "Solicitar", selecione até 3 dos 5 territórios da fila e clique em "Solicitar Selecionados".</p>
         </div>`;
       return;
     }
@@ -488,32 +519,60 @@ const App = {
       ? `<p class="text-xs text-[#b06000] font-medium mt-2">👤 Com: <strong>${Utils.escapeHtml(t.dirigente || "Dirigente")}</strong> desde ${Utils.formatarDataBr(t.ultimaData)}</p>`
       : `<p class="text-xs text-slate-500 mt-2">📅 Última conclusão: <strong>${Utils.formatarDataBr(t.ultimaData)}</strong></p>`;
 
-    const infoPredios = qtdPredios > 0
-      ? `<div class="mt-2.5 flex items-center justify-between gap-2 px-3 py-1.5 rounded-xl bg-slate-50 border border-slate-200/80">
-          <span class="text-[11px] font-semibold text-slate-700">🏢 ${qtdPredios} prédio(s) no cartão</span>
-          <button type="button" onclick="MapaTerritorios.abrirModalTerritorio(${num})" class="text-[11px] font-bold text-[#0b57d0] hover:underline">
-            ${t.statusReal === "OCUPADO" ? `${prediosConcluidos}/${qtdPredios} trabalhados →` : "Ver interfones →"}
-          </button>
-        </div>`
-      : `<div class="mt-2.5 px-3 py-1.5 rounded-xl bg-slate-50/60 border border-slate-100 text-[11px] text-slate-400">
-          Residencial horizontal (sem prédios verticais)
+    let infoPredios = "";
+    if (qtdPredios > 0) {
+      const amostra = predios.slice(0, 3);
+      const itensHtml = amostra.map((p, idx) => {
+        const { interfoneBadge } = Utils.obterBadgesPredio(p);
+        const concluido = Boolean(p.trabalhadoNesteCiclo || p.ultimaDataConclusao);
+        return `
+          <div class="flex items-start justify-between gap-2 py-1.5 ${idx > 0 ? "border-t border-slate-200/70" : ""}">
+            <div class="min-w-0">
+              <p class="text-[11px] font-bold text-slate-800 truncate">${concluido ? "✓ " : ""}${idx + 1}. ${Utils.escapeHtml(p.nomeEdificio)}</p>
+              <p class="text-[10px] text-slate-600 truncate">${Utils.escapeHtml(p.endereco)}</p>
+            </div>
+            <span class="px-1.5 py-0.5 text-[9px] font-semibold rounded-full shrink-0 ${interfoneBadge.cls}">${interfoneBadge.texto}</span>
+          </div>
+        `;
+      }).join("");
+
+      const maisPrediosHtml = qtdPredios > 3
+        ? `<button type="button" onclick="MapaTerritorios.abrirModalTerritorio(${num})" class="mt-1 w-full text-left text-[11px] font-bold text-[#0b57d0] hover:underline">
+            + ${qtdPredios - 3} outro(s) prédio(s) no cartão — Ver todos no mapa →
+          </button>`
+        : "";
+
+      infoPredios = `
+        <div class="mt-3 p-2.5 rounded-xl bg-slate-50 border border-slate-200/90">
+          <div class="flex items-center justify-between gap-2 mb-1">
+            <span class="text-[11px] font-bold text-slate-800">🏢 ${qtdPredios} Prédio(s) no Cartão</span>
+            <button type="button" onclick="MapaTerritorios.abrirModalTerritorio(${num})" class="text-[11px] font-bold text-[#0b57d0] hover:underline">
+              ${t.statusReal === "OCUPADO" ? `${prediosConcluidos}/${qtdPredios} trabalhados →` : "Mapa e Interfones →"}
+            </button>
+          </div>
+          <div class="divide-y divide-slate-100">
+            ${itensHtml}
+          </div>
+          ${maisPrediosHtml}
         </div>`;
+    } else {
+      infoPredios = `
+        <div class="mt-3 px-3 py-2 rounded-xl bg-slate-50/70 border border-slate-200/60 flex items-center justify-between gap-2">
+          <span class="text-[11px] text-slate-500">🏡 Sem prédios verticais neste cartão</span>
+          ${naFila5 ? `<button type="button" onclick="App.filtrarFilaComPredios()" class="text-[11px] font-semibold text-[#0b57d0] hover:underline shrink-0">Ver fila com prédios →</button>` : ""}
+        </div>`;
+    }
 
     let areaAcoes = "";
     if (this.podeSolicitarTerritorio(t)) {
       areaAcoes = `
         <button type="button" onclick="App.alternarSelecaoTerritorio(${num})"
-          class="flex-1 py-2 px-3 rounded-full text-xs font-semibold transition flex items-center justify-center gap-1.5 ${
+          class="flex-1 py-2 px-3.5 rounded-full text-xs font-semibold transition flex items-center justify-center gap-1.5 ${
             selecionado
               ? "bg-[#0b57d0] text-white shadow-xs"
               : "bg-[#d3e3fd] hover:bg-[#c2d7fc] text-[#041e49]"
           }">
-          <span>${selecionado ? "✓ Selecionado" : "Selecionar"}</span>
-        </button>
-        <button type="button" onclick="App.acaoSolicitar(${num})"
-          class="py-2 px-3.5 rounded-full border border-[#0b57d0] text-[#0b57d0] hover:bg-[#f0f6ff] font-semibold text-xs transition"
-          title="Solicitar apenas este território imediatamente">
-          Solicitar 1
+          <span>${selecionado ? "✓ Selecionado" : "☐ Selecionar"}</span>
         </button>
       `;
     } else if (t.statusReal === "OCUPADO" && (t.emMinhaPosse || (this.usuarioAtual && this.usuarioAtual.perfil === "ADMIN"))) {

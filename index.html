@@ -22,7 +22,7 @@
 
   <!-- Google Identity Services (OAuth2 / OIDC Real) -->
   <script src="https://accounts.google.com/gsi/client" async defer></script>
-  <link rel="stylesheet" href="css/styles.css" />
+  <link rel="stylesheet" href="css/styles.css?v=7" />
 </head>
 <body class="bg-[#f8fafc] text-[#1f1f1f] min-h-screen flex flex-col selection:bg-[#d3e3fd] selection:text-[#041e49]">
 
@@ -149,38 +149,34 @@
           </div>
         </div>
 
-        <!-- Banner da Regra de Negócio: Fila dos 5 Mais Antigos (Seleção de até 3) -->
-        <div class="bg-white border border-slate-200 rounded-2xl p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+        <!-- Banner da Regra de Negócio: Fila dos 5 Mais Antigos (Seleção de até 3 + Botão Solicitar na Aba) -->
+        <div class="bg-white border border-slate-200 rounded-2xl p-4 flex flex-col lg:flex-row lg:items-center justify-between gap-3.5 shadow-2xs">
           <div class="space-y-1">
             <div class="flex items-center gap-2 flex-wrap">
               <span class="px-2.5 py-0.5 rounded-full text-[11px] font-semibold bg-[#d3e3fd] text-[#041e49]">
-                Fila Oficial por Antiguidade
+                Fila de Antiguidade (5 Territórios)
               </span>
               <span id="queue-selection-badge" class="px-2.5 py-0.5 rounded-full text-[11px] font-semibold bg-slate-100 text-slate-700">
                 0 de 3 selecionados
               </span>
             </div>
-            <h3 class="text-sm font-bold text-slate-900">Próximos 5 Territórios Disponíveis para Solicitação</h3>
+            <h3 class="text-sm font-bold text-slate-900">Selecione até 3 dos 5 territórios disponíveis na fila</h3>
             <p class="text-xs text-slate-500">
-              Exibindo os <strong>5 cartões mais antigos</strong> da fila. Você pode selecionar <strong>até 3 territórios</strong> simultaneamente.
+              Marque a opção <strong>Selecionar</strong> nos cartões desejados abaixo e clique em <strong>Solicitar Territórios</strong>.
             </p>
           </div>
 
-          <!-- Filtro rápido de Tipo (Cidade / Rural) e Modo Admin -->
+          <!-- Filtro rápido de Tipo + Botão Principal de Solicitar na Aba -->
           <div class="flex flex-wrap items-center gap-2">
             <select id="filter-tipo" class="px-3.5 py-2 text-xs bg-slate-50 border border-slate-300 rounded-full text-slate-700 font-medium focus:outline-none focus:border-[#0b57d0]">
-              <option value="TODOS">Cidade + Rural (Fila Top 5)</option>
-              <option value="Cidade">Somente Urbano (Top 5)</option>
-              <option value="Rural">Somente Rural (Top 5)</option>
+              <option value="TODOS">Fila Geral (5 mais antigos)</option>
+              <option value="COM_PREDIOS">🏢 Com Prédios (5 mais antigos)</option>
+              <option value="Cidade">Urbano (5 mais antigos)</option>
+              <option value="Rural">Rural (5 mais antigos)</option>
             </select>
-            <select id="filter-status" class="hidden px-3.5 py-2 text-xs bg-slate-50 border border-slate-300 rounded-full text-slate-700 font-medium focus:outline-none focus:border-[#0b57d0]">
-              <option value="FILA_5">Fila de Solicitação (Top 5)</option>
-              <option value="TODOS">Catálogo Completo (Admin)</option>
-              <option value="DISPONÍVEL">Todos Disponíveis (Admin)</option>
-              <option value="OCUPADO">Todos Ocupados (Admin)</option>
-              <option value="RECENTE">Em Descanso 120d (Admin)</option>
-            </select>
-            <input id="filter-search" type="search" placeholder="Filtrar..." class="hidden w-40 px-3.5 py-2 text-xs bg-slate-50 border border-slate-300 rounded-full text-slate-700 focus:outline-none focus:border-[#0b57d0]" />
+            <button id="btn-solicitar-aba" type="button" disabled class="px-5 py-2 rounded-full bg-[#0b57d0] hover:bg-[#0842a0] disabled:bg-slate-200 disabled:text-slate-400 text-white font-bold text-xs transition shadow-xs flex items-center gap-1.5 cursor-pointer disabled:cursor-not-allowed">
+              <span>📌 Solicitar Selecionados (0/3)</span>
+            </button>
           </div>
         </div>
 
@@ -508,13 +504,15 @@
     <!-- ================================================================== -->
     <!-- MODAL MATERIAL 3: CONFIRMAÇÕES, CONCORRÊNCIA E DEVOLUÇÃO 2 ETAPAS  -->
     <!-- ================================================================== -->
-    <div id="modal-m3-dialog" class="hidden fixed inset-0 z-[60] m3-backdrop items-center justify-center p-4"></div>
+    <div id="modal-m3-dialog" class="hidden fixed inset-0 z-[60] m3-backdrop items-center justify-center p-4">
+      <div id="modal-m3-content" class="m3-dialog-surface w-full max-w-md overflow-hidden"></div>
+    </div>
   </div>
 
   <!-- Scripts Modulares da Aplicação -->
-  <script src="js/utils.js"></script>
-  <script src="js/api.js"></script>
-  <script src="js/map.js"></script>
-  <script src="js/app.js"></script>
+  <script src="js/utils.js?v=7"></script>
+  <script src="js/api.js?v=7"></script>
+  <script src="js/map.js?v=7"></script>
+  <script src="js/app.js?v=7"></script>
 </body>
 </html>

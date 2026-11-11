@@ -59,10 +59,51 @@ body {
 .m3-card:hover {
   box-shadow: 0 2px 6px rgba(60, 64, 67, 0.1), 0 6px 16px rgba(60, 64, 67, 0.06);
 }
-.m3-card-selected {
+.m3-card-selected,
+.selected-card {
   border-color: #0b57d0 !important;
   background-color: #f4f8ff !important;
   box-shadow: 0 0 0 2px rgba(11, 87, 208, 0.18), 0 4px 12px rgba(11, 87, 208, 0.08) !important;
+}
+
+.m3-btn-filled {
+  background-color: #0b57d0;
+  color: #ffffff;
+  font-weight: 600;
+  border-radius: 9999px;
+  padding: 0.5rem 1rem;
+  transition: background-color 0.15s ease, box-shadow 0.15s ease;
+  cursor: pointer;
+}
+.m3-btn-filled:hover {
+  background-color: #0842a0;
+  box-shadow: 0 1px 3px rgba(11, 87, 208, 0.28);
+}
+
+.m3-btn-tonal {
+  background-color: #d3e3fd;
+  color: #041e49;
+  font-weight: 600;
+  border-radius: 9999px;
+  padding: 0.5rem 1rem;
+  transition: background-color 0.15s ease;
+  cursor: pointer;
+}
+.m3-btn-tonal:hover {
+  background-color: #c2d7fc;
+}
+
+.m3-backdrop {
+  background-color: rgba(15, 23, 42, 0.48);
+  backdrop-filter: blur(3px);
+}
+
+.m3-dialog-surface {
+  background-color: #ffffff;
+  border: 1px solid #e2e8f0;
+  border-radius: 1.75rem;
+  box-shadow: 0 20px 32px -8px rgba(15, 23, 42, 0.24), 0 8px 16px -6px rgba(15, 23, 42, 0.12);
+  animation: m3DialogEnter 0.2s cubic-bezier(0.2, 0, 0, 1) forwards;
 }
 
 /* Animação de Diálogo Material 3 */
@@ -140,4 +181,16 @@ body {
 .predio-pin-marker:hover {
   transform: scale(1.18);
   z-index: 999 !important;
+}
+.pin-green {
+  background-color: #16a34a;
+}
+.pin-amber {
+  background-color: #d97706;
+}
+.pin-red {
+  background-color: #dc2626;
+}
+.pin-done {
+  background-color: #0b57d0;
 }
