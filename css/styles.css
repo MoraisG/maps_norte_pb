@@ -1,4 +1,26 @@
-/* Estilos Customizados PWA Territórios */
+/* ==========================================================================
+   Google Material Design 3 — Minimalist PWA Styles (Gestão de Territórios)
+   ========================================================================== */
+:root {
+  --m3-surface: #f8fafc;
+  --m3-surface-container: #ffffff;
+  --m3-surface-variant: #f1f5f9;
+  --m3-outline: #e2e8f0;
+  --m3-primary: #0b57d0;
+  --m3-primary-hover: #0842a0;
+  --m3-primary-container: #d3e3fd;
+  --m3-on-primary-container: #041e49;
+  --m3-text-primary: #1f1f1f;
+  --m3-text-secondary: #444746;
+}
+
+body {
+  font-family: "Inter", "Roboto", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  background-color: var(--m3-surface);
+  color: var(--m3-text-primary);
+  -webkit-font-smoothing: antialiased;
+}
+
 .no-scrollbar::-webkit-scrollbar {
   display: none;
 }
@@ -7,41 +29,115 @@
   scrollbar-width: none;
 }
 
+/* Abas de Navegação Padrão Google Material 3 (Navigation Pills) */
 .nav-tab {
-  color: #94a3b8;
-  background-color: rgba(15, 23, 42, 0.6);
-  border: 1px solid rgba(51, 65, 85, 0.5);
+  color: var(--m3-text-secondary);
+  background-color: transparent;
+  border: 1px solid transparent;
+  border-radius: 9999px;
+  transition: all 0.18s cubic-bezier(0.2, 0, 0, 1);
 }
 .nav-tab:hover {
-  color: #f8fafc;
-  background-color: rgba(30, 41, 59, 0.8);
+  color: var(--m3-text-primary);
+  background-color: #eef2f6;
 }
 .nav-tab.active-tab {
-  color: #ffffff;
-  background-color: #4f46e5;
-  border-color: #6366f1;
-  box-shadow: 0 4px 12px rgba(79, 70, 229, 0.35);
+  color: var(--m3-on-primary-container);
+  background-color: var(--m3-primary-container);
+  border-color: #b8d1fc;
+  font-weight: 600;
 }
 
-/* Customização de Popups do Leaflet no Tema Escuro */
+/* Elevação sutil padrão Google Workspace Cards */
+.m3-card {
+  background: #ffffff;
+  border: 1px solid #e2e8f0;
+  border-radius: 1.25rem;
+  box-shadow: 0 1px 2px rgba(60, 64, 67, 0.06), 0 2px 6px rgba(60, 64, 67, 0.04);
+  transition: box-shadow 0.2s ease, border-color 0.2s ease, transform 0.15s ease;
+}
+.m3-card:hover {
+  box-shadow: 0 2px 6px rgba(60, 64, 67, 0.1), 0 6px 16px rgba(60, 64, 67, 0.06);
+}
+.m3-card-selected {
+  border-color: #0b57d0 !important;
+  background-color: #f4f8ff !important;
+  box-shadow: 0 0 0 2px rgba(11, 87, 208, 0.18), 0 4px 12px rgba(11, 87, 208, 0.08) !important;
+}
+
+/* Animação de Diálogo Material 3 */
+@keyframes m3DialogEnter {
+  from {
+    opacity: 0;
+    transform: scale(0.95) translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+  }
+}
+.m3-dialog-panel {
+  animation: m3DialogEnter 0.2s cubic-bezier(0.2, 0, 0, 1) forwards;
+}
+
+/* Radio Cards para Devolução em Duas Etapas */
+.m3-radio-card {
+  border: 1.5px solid #e2e8f0;
+  border-radius: 1rem;
+  background: #ffffff;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+.m3-radio-card:hover {
+  border-color: #94a3b8;
+  background: #f8fafc;
+}
+.m3-radio-card.selected {
+  border-color: #0b57d0;
+  background: #f0f6ff;
+  box-shadow: 0 0 0 1px #0b57d0;
+}
+
+/* Customização de Popups e Tooltips do Leaflet no Tema Google Maps Light */
 .leaflet-popup-content-wrapper,
 .leaflet-popup-tip {
-  background: #0f172a !important;
-  color: #f1f5f9 !important;
-  border: 1px solid #334155;
-  border-radius: 0.75rem !important;
+  background: #ffffff !important;
+  color: #1f1f1f !important;
+  border: 1px solid #e2e8f0;
+  border-radius: 1rem !important;
+  box-shadow: 0 4px 16px rgba(60, 64, 67, 0.15) !important;
 }
 .leaflet-container {
-  background: #090d16;
+  background: #eef2f6;
   font-family: inherit;
 }
 .territorio-label-tooltip {
-  background: rgba(15, 23, 42, 0.85) !important;
-  border: 1px solid rgba(148, 163, 184, 0.4) !important;
-  color: #f8fafc !important;
+  background: rgba(255, 255, 255, 0.94) !important;
+  border: 1px solid #cbd5e1 !important;
+  color: #0f172a !important;
   font-weight: 700;
   font-size: 11px;
-  border-radius: 6px;
-  padding: 1px 5px;
-  box-shadow: 0 2px 4px rgba(0,0,0,0.5);
+  border-radius: 9999px;
+  padding: 1px 7px;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.14);
+}
+
+/* Pino Numerado de Prédios no Mapa */
+.predio-pin-marker {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 9999px;
+  font-size: 11px;
+  font-weight: 700;
+  color: #ffffff;
+  border: 2px solid #ffffff;
+  box-shadow: 0 2px 6px rgba(15, 23, 42, 0.35);
+  transition: transform 0.15s ease;
+}
+.predio-pin-marker:hover {
+  transform: scale(1.18);
+  z-index: 999 !important;
 }

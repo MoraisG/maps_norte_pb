@@ -1,16 +1,21 @@
 /**
- * Controlador Principal da Aplicação PWA — Gestão de Territórios
+ * Controlador Principal da Aplicação PWA — Gestão de Territórios Congregação Norte PB
+ * Padrão Visual: Google Material Design 3 Minimalista
+ * Regras de Negócio:
+ * - Fila estrita dos 5 territórios mais antigos disponíveis (seleção de até 3 por vez com LockService anti-concorrência)
+ * - Devolução em 2 etapas (Completo -> 120d | Não Completo -> Quadras faltantes, Prédios não trabalhados ou Não iniciado)
+ * - Guia de Prédios integrado ao cartão com marcação macro de prédio trabalhado (LGPD Privacy by Design)
  */
 const App = {
   usuarioAtual: null,
   territorios: [],
   usuariosAdmin: [],
+  territoriosSelecionados: new Set(),
 
   init() {
     this.registrarServiceWorker();
     this.configurarEventosUI();
 
-    // Verifica se já existe sessão ativa válida no sessionStorage
     const token = ApiClient.obterTokenSessao();
     const usr = ApiClient.obterUsuarioSessao();
     if (token && usr) {
@@ -21,7 +26,7 @@ const App = {
     }
 
     window.addEventListener("sessao-expirada", () => {
-      this.sairParaTelaLogin("Sua sessão expirou. Por favor, entre novamente com o Google.");
+      this.sairParaTelaLogin("Sua sessão expirou. Por favor, entre novamente com sua conta Google.");
     });
   },
 
@@ -32,21 +37,34 @@ const App = {
   },
 
   configurarEventosUI() {
-    // Logout e Refresh
     document.getElementById("btn-logout").addEventListener("click", () => this.executarLogout());
     document.getElementById("btn-refresh").addEventListener("click", () => this.sincronizarDados());
 
-    // Navegação entre Abas
     document.querySelectorAll(".nav-tab").forEach(btn => {
       btn.addEventListener("click", () => this.alternarAba(btn.dataset.tab));
     });
 
-    // Filtros em Tempo Real
     document.getElementById("filter-search").addEventListener("input", () => this.renderizarCardsTerritorios());
-    document.getElementById("filter-status").addEventListener("change", () => this.renderizarCardsTerritorios());
-    document.getElementById("filter-tipo").addEventListener("change", () => this.renderizarCardsTerritorios());
+    document.getElementById("filter-status").addEventListener("change", () => {
+      this.limparSelecaoLote();
+      this.renderizarCardsTerritorios();
+    });
+    document.getElementById("filter-tipo").addEventListener("change", () => {
+      this.limparSelecaoLote();
+      this.renderizarCardsTerritorios();
+    });
 
-    // Eventos do Dashboard de Ocupação e Relatório PDF por Ano de Serviço
+    // Barra flutuante de seleção em lote (até 3 de 5)
+    const btnLimparSel = document.getElementById("btn-limpar-selecao");
+    const btnSolicitarLote = document.getElementById("btn-solicitar-lote");
+    if (btnLimparSel) {
+      btnLimparSel.addEventListener("click", () => this.limparSelecaoLote());
+    }
+    if (btnSolicitarLote) {
+      btnSolicitarLote.addEventListener("click", () => this.acaoSolicitarLote());
+    }
+
+    // Dashboard e Relatório S-13
     this.inicializarSeletorAnoServico();
     const inputDashSearch = document.getElementById("dash-search-ocupados");
     if (inputDashSearch) {
@@ -57,7 +75,7 @@ const App = {
       btnGerarPdf.addEventListener("click", () => this.exportarRelatorioPdfAnoServico());
     }
 
-    // Eventos da Modal de Mapa Individual do Território
+    // Modal do Mapa e Prédios do Cartão
     const btnCloseModal = document.getElementById("btn-close-modal-mapa");
     const btnFecharModal = document.getElementById("btn-fechar-modal-mapa");
     const modalMapa = document.getElementById("modal-mapa-territorio");
@@ -77,7 +95,7 @@ const App = {
       if (e.key === "Escape") MapaTerritorios.fecharModalTerritorio();
     });
 
-    // Eventos exclusivos do Painel Admin
+    // Painel Admin
     document.getElementById("form-admin-usuario").addEventListener("submit", e => {
       e.preventDefault();
       this.salvarUsuarioWhitelist();
@@ -87,16 +105,13 @@ const App = {
     document.getElementById("btn-refresh-audit").addEventListener("click", () => this.carregarDadosAdmin());
   },
 
-  /**
-   * Inicializa o botão oficial "Entrar com Google" (Google Identity Services)
-   */
   inicializarBotaoGoogle() {
     const clientId = ApiClient.getClientId();
     const container = document.getElementById("google-btn-container");
 
     if (!clientId) {
       container.innerHTML = `
-        <p class="text-xs text-rose-300 bg-rose-950/50 border border-rose-700/50 px-3.5 py-2.5 rounded-xl">
+        <p class="text-xs text-[#b3261e] bg-[#fce8e6] border border-[#f6aea9] px-3.5 py-2.5 rounded-2xl">
           Serviço de autenticação indisponível no momento. Contate o administrador.
         </p>`;
       return;
@@ -115,7 +130,7 @@ const App = {
     });
 
     window.google.accounts.id.renderButton(container, {
-      theme: "filled_blue",
+      theme: "outline",
       size: "large",
       shape: "pill",
       text: "signin_with",
@@ -155,11 +170,25 @@ const App = {
     badgeRole.textContent = this.usuarioAtual.perfil;
 
     const btnAdmin = document.getElementById("nav-btn-admin");
+    const selectStatus = document.getElementById("filter-status");
+    const inputSearch = document.getElementById("filter-search");
+
     if (this.usuarioAtual.perfil === "ADMIN") {
       btnAdmin.classList.remove("hidden");
-      badgeRole.className = "px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/40";
+      if (selectStatus) selectStatus.classList.remove("hidden");
+      if (inputSearch) inputSearch.classList.remove("hidden");
+      badgeRole.className = "px-2.5 py-0.5 text-[10px] font-bold uppercase tracking-wider rounded-full bg-[#fef7e0] text-[#b06000] border border-[#f5d087]";
     } else {
       btnAdmin.classList.add("hidden");
+      if (selectStatus) {
+        selectStatus.value = "FILA_5";
+        selectStatus.classList.add("hidden");
+      }
+      if (inputSearch) {
+        inputSearch.value = "";
+        inputSearch.classList.add("hidden");
+      }
+      badgeRole.className = "px-2.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider rounded-full bg-[#d3e3fd] text-[#041e49]";
     }
 
     this.sincronizarDados();
@@ -175,6 +204,8 @@ const App = {
   sairParaTelaLogin(mensagemErro = "") {
     ApiClient.limparSessaoLocal();
     this.usuarioAtual = null;
+    this.territoriosSelecionados.clear();
+    this.atualizarBarraSelecaoFlutuante();
     document.getElementById("view-app").classList.add("hidden");
     document.getElementById("view-login").classList.remove("hidden");
 
@@ -197,6 +228,13 @@ const App = {
     const btnAtivo = document.querySelector(`.nav-tab[data-tab="${tabId}"]`);
     if (btnAtivo) btnAtivo.classList.add("active-tab");
 
+    if (tabId !== "tab-territorios") {
+      document.getElementById("floating-selection-bar")?.classList.add("hidden");
+      document.getElementById("floating-selection-bar")?.classList.remove("flex");
+    } else {
+      this.atualizarBarraSelecaoFlutuante();
+    }
+
     if (tabId === "tab-mapa") {
       MapaTerritorios.inicializar();
       MapaTerritorios.renderizarPoligonos(this.territorios);
@@ -213,19 +251,10 @@ const App = {
     if (this.sincronizando) return;
     this.sincronizando = true;
     try {
-      Utils.mostrarToast("Sincronizando territórios com a planilha...", "aviso");
       const res = await ApiClient.request("territorios/listar");
       const listaBruta = res.territorios || [];
-      this.territorios = this.ordenarPorAntiguidade(this.normalizarTerritorios(listaBruta));
-      this.atualizarIndicadores();
-      this.renderizarCardsTerritorios();
-      this.renderizarMeusTerritorios();
-      this.renderizarDashboardOcupacao();
-
-      if (MapaTerritorios.inicializado) {
-        MapaTerritorios.renderizarPoligonos(this.territorios);
-      }
-      Utils.mostrarToast("Dados atualizados com sucesso!", "sucesso");
+      this.aplicarListaTerritoriosServidor(listaBruta);
+      Utils.mostrarToast(" Fila e mapas sincronizados!", "sucesso");
     } catch (err) {
       Utils.mostrarToast(err.message, "erro");
     } finally {
@@ -233,10 +262,31 @@ const App = {
     }
   },
 
-  /**
-   * Normaliza o status de cada território garantindo que somente fique DISPONÍVEL
-   * quando tiver mais de 120 dias desde a última devolução (ou nunca trabalhado).
-   */
+  aplicarListaTerritoriosServidor(listaBruta) {
+    this.territorios = this.ordenarPorAntiguidade(this.normalizarTerritorios(listaBruta));
+
+    // Remove da seleção qualquer território que não esteja mais disponível na fila de 5
+    const fila5Set = new Set(this.obterFilaCincoDisponiveis().map(t => Number(t.numero)));
+    for (const numSel of Array.from(this.territoriosSelecionados)) {
+      if (!fila5Set.has(Number(numSel))) {
+        this.territoriosSelecionados.delete(numSel);
+      }
+    }
+
+    this.atualizarIndicadores();
+    this.renderizarCardsTerritorios();
+    this.renderizarMeusTerritorios();
+    this.renderizarDashboardOcupacao();
+    this.atualizarBarraSelecaoFlutuante();
+
+    if (MapaTerritorios.inicializado) {
+      MapaTerritorios.renderizarPoligonos(this.territorios);
+    }
+    if (MapaTerritorios.territorioModalAtual) {
+      MapaTerritorios.abrirModalTerritorio(MapaTerritorios.territorioModalAtual);
+    }
+  },
+
   normalizarTerritorios(lista) {
     return lista.map(t => {
       const copia = { ...t };
@@ -252,19 +302,40 @@ const App = {
   },
 
   /**
-   * Verifica se o território cumpre o requisito de mais de 120 dias desde a última devolução
+   * Retorna os 5 territórios mais antigos atualmente disponíveis para solicitação (Regra da Fila Top 5)
+   */
+  obterFilaCincoDisponiveis(filtroTipoOpcional) {
+    const filtroTipo = filtroTipoOpcional || (document.getElementById("filter-tipo")?.value || "TODOS");
+    const disponiveisOrdenados = this.ordenarPorAntiguidade(
+      this.territorios.filter(t => {
+        if (t.statusReal !== "DISPONÍVEL") return false;
+        const dias = Utils.calcularDiasDesdeData(t.ultimaData);
+        if (dias <= Utils.DIAS_QUARENTENA_DEVOLUCAO) return false;
+        if (filtroTipo !== "TODOS" && t.tipo !== filtroTipo) return false;
+        return true;
+      })
+    );
+    return disponiveisOrdenados.slice(0, Utils.LIMITE_FILA_EXIBICAO);
+  },
+
+  /**
+   * Verifica se o território pode ser solicitado:
+   * - Deve estar DISPONÍVEL (> 120 dias)
+   * - Para publicadores (ou modo Fila Top 5), deve constar nos 5 primeiros da fila de antiguidade
    */
   podeSolicitarTerritorio(t) {
     if (!t || t.statusReal === "OCUPADO") return false;
     const dias = Utils.calcularDiasDesdeData(t.ultimaData);
-    return dias > Utils.DIAS_QUARENTENA_DEVOLUCAO && t.statusReal === "DISPONÍVEL";
+    if (dias <= Utils.DIAS_QUARENTENA_DEVOLUCAO || t.statusReal !== "DISPONÍVEL") return false;
+
+    const modoStatus = document.getElementById("filter-status")?.value || "FILA_5";
+    if (this.usuarioAtual && this.usuarioAtual.perfil === "ADMIN" && modoStatus !== "FILA_5") {
+      return true;
+    }
+    const fila5 = this.obterFilaCincoDisponiveis();
+    return fila5.some(item => Number(item.numero) === Number(t.numero));
   },
 
-  /**
-   * Ordena sempre pelo critério de antiguidade:
-   * 1. Territórios nunca trabalhados ou devolvidos há mais tempo primeiro
-   * 2. Territórios atualmente ocupados ao final
-   */
   ordenarPorAntiguidade(lista) {
     return [...lista].sort((a, b) => {
       const aOcupado = a.statusReal === "OCUPADO" ? 1 : 0;
@@ -284,41 +355,108 @@ const App = {
     const ocup = this.territorios.filter(t => t.statusReal === "OCUPADO").length;
     const rec = this.territorios.filter(t => t.statusReal === "RECENTE").length;
     const meus = this.territorios.filter(t => t.emMinhaPosse).length;
+    const fila5 = this.obterFilaCincoDisponiveis();
 
     document.getElementById("kpi-disponiveis").textContent = disp;
     document.getElementById("kpi-ocupados").textContent = ocup;
     document.getElementById("kpi-recentes").textContent = rec;
     document.getElementById("kpi-comigo").textContent = meus;
-    document.getElementById("count-all").textContent = this.territorios.length;
+    document.getElementById("count-all").textContent = fila5.length;
     document.getElementById("count-mine").textContent = meus;
     const badgeOcupNav = document.getElementById("count-ocupados-nav");
     if (badgeOcupNav) badgeOcupNav.textContent = ocup;
   },
 
-  renderizarCardsTerritorios() {
-    const busca = document.getElementById("filter-search").value.toLowerCase().trim();
-    const filtroStatus = document.getElementById("filter-status").value;
-    const filtroTipo = document.getElementById("filter-tipo").value;
+  alternarSelecaoTerritorio(numero) {
+    const num = Number(numero);
+    if (this.territoriosSelecionados.has(num)) {
+      this.territoriosSelecionados.delete(num);
+    } else {
+      if (this.territoriosSelecionados.size >= Utils.LIMITE_SELECAO_LOTE) {
+        Utils.mostrarToast(`Você pode selecionar no máximo ${Utils.LIMITE_SELECAO_LOTE} territórios dos ${Utils.LIMITE_FILA_EXIBICAO} disponíveis na fila.`, "aviso");
+        return;
+      }
+      this.territoriosSelecionados.add(num);
+    }
+    this.renderizarCardsTerritorios();
+    this.atualizarBarraSelecaoFlutuante();
+  },
 
-    const filtrados = this.ordenarPorAntiguidade(
-      this.territorios.filter(t => {
-        if (filtroStatus !== "TODOS" && t.statusReal !== filtroStatus) return false;
-        if (filtroTipo !== "TODOS" && t.tipo !== filtroTipo) return false;
-        if (busca) {
-          const texto = `${t.numero} ${t.bairro} ${t.dirigente || ""}`.toLowerCase();
-          if (!texto.includes(busca)) return false;
-        }
-        return true;
-      })
-    );
+  limparSelecaoLote() {
+    this.territoriosSelecionados.clear();
+    this.renderizarCardsTerritorios();
+    this.atualizarBarraSelecaoFlutuante();
+  },
 
-    const container = document.getElementById("grid-territorios");
-    if (!filtrados.length) {
-      container.innerHTML = `<div class="col-span-full text-center py-10 text-slate-400 text-xs">Nenhum território encontrado para os filtros selecionados.</div>`;
+  atualizarBarraSelecaoFlutuante() {
+    const qtd = this.territoriosSelecionados.size;
+    const badgeTop = document.getElementById("queue-selection-badge");
+    if (badgeTop) {
+      badgeTop.textContent = `${qtd} de ${Utils.LIMITE_SELECAO_LOTE} selecionados`;
+      badgeTop.className = qtd > 0
+        ? "px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-[#0b57d0] text-white"
+        : "px-2.5 py-0.5 rounded-full text-[11px] font-semibold bg-slate-100 text-slate-700";
+    }
+
+    const bar = document.getElementById("floating-selection-bar");
+    if (!bar) return;
+
+    const abaTerritoriosAtiva = !document.getElementById("tab-territorios")?.classList.contains("hidden");
+    if (qtd === 0 || !abaTerritoriosAtiva) {
+      bar.classList.add("hidden");
+      bar.classList.remove("flex");
       return;
     }
 
-    container.innerHTML = filtrados.map(t => this.criarHtmlCardTerritorio(t)).join("");
+    const nums = Array.from(this.territoriosSelecionados).sort((a, b) => a - b);
+    document.getElementById("floating-selection-count").textContent = String(qtd);
+    document.getElementById("floating-selection-label").textContent =
+      `${qtd} de ${Utils.LIMITE_SELECAO_LOTE} território(s): ${nums.map(n => `T-${n}`).join(", ")}`;
+    document.getElementById("floating-selection-sub").textContent =
+      `Reserva protegida contra concorrência`;
+
+    bar.classList.remove("hidden");
+    bar.classList.add("flex");
+  },
+
+  renderizarCardsTerritorios() {
+    const busca = (document.getElementById("filter-search")?.value || "").toLowerCase().trim();
+    const filtroStatus = document.getElementById("filter-status")?.value || "FILA_5";
+    const filtroTipo = document.getElementById("filter-tipo")?.value || "TODOS";
+
+    const fila5 = this.obterFilaCincoDisponiveis(filtroTipo);
+    const fila5MapPosicao = new Map();
+    fila5.forEach((t, idx) => fila5MapPosicao.set(Number(t.numero), idx + 1));
+
+    let listaExibicao = [];
+    if (filtroStatus === "FILA_5" || !this.usuarioAtual || this.usuarioAtual.perfil !== "ADMIN") {
+      listaExibicao = fila5;
+    } else {
+      listaExibicao = this.ordenarPorAntiguidade(
+        this.territorios.filter(t => {
+          if (filtroStatus !== "TODOS" && t.statusReal !== filtroStatus) return false;
+          if (filtroTipo !== "TODOS" && t.tipo !== filtroTipo) return false;
+          if (busca) {
+            const texto = `${t.numero} ${t.bairro} ${t.dirigente || ""}`.toLowerCase();
+            if (!texto.includes(busca)) return false;
+          }
+          return true;
+        })
+      );
+    }
+
+    const container = document.getElementById("grid-territorios");
+    if (!listaExibicao.length) {
+      container.innerHTML = `
+        <div class="col-span-full bg-white border border-slate-200 rounded-2xl text-center py-10 px-4 text-slate-500 text-xs">
+          Nenhum território disponível na fila para o filtro selecionado no momento.
+        </div>`;
+      return;
+    }
+
+    container.innerHTML = listaExibicao.map(t =>
+      this.criarHtmlCardTerritorio(t, fila5MapPosicao.get(Number(t.numero)) || null)
+    ).join("");
   },
 
   renderizarMeusTerritorios() {
@@ -327,82 +465,221 @@ const App = {
 
     if (!meus.length) {
       container.innerHTML = `
-        <div class="col-span-full bg-slate-900/60 border border-slate-800 rounded-xl p-8 text-center">
-          <p class="text-sm font-semibold text-slate-300">Você não possui territórios pendentes em sua posse no momento.</p>
-          <p class="text-xs text-slate-400 mt-1">Vá até a aba "Territórios" ou "Mapa Interativo" para solicitar um novo cartão.</p>
+        <div class="col-span-full bg-white border border-slate-200 rounded-2xl p-8 text-center">
+          <p class="text-sm font-bold text-slate-800">Você não possui cartões de território em sua posse no momento.</p>
+          <p class="text-xs text-slate-500 mt-1">Acesse a aba "Solicitar" para escolher até 3 dos 5 territórios da fila de antiguidade.</p>
         </div>`;
       return;
     }
 
-    container.innerHTML = meus.map(t => this.criarHtmlCardTerritorio(t)).join("");
+    container.innerHTML = meus.map(t => this.criarHtmlCardTerritorio(t, null)).join("");
   },
 
-  criarHtmlCardTerritorio(t) {
-    const { badgeClass, label: statusLabel } = Utils.obterEstiloStatus(t);
+  criarHtmlCardTerritorio(t, posicaoFila = null) {
+    const num = Number(t.numero);
+    const naFila5 = Boolean(posicaoFila);
+    const selecionado = this.territoriosSelecionados.has(num);
+    const { badgeClass, label: statusLabel } = Utils.obterEstiloStatus(t, naFila5);
+    const predios = Array.isArray(t.predios) ? t.predios : [];
+    const qtdPredios = predios.length;
+    const prediosConcluidos = predios.filter(p => p.trabalhadoNesteCiclo || p.ultimaDataConclusao).length;
 
     const infoPosse = t.statusReal === "OCUPADO"
-      ? `<p class="text-xs text-amber-300/90 mt-2">👤 Em posse de: <strong>${Utils.escapeHtml(t.dirigente || "Dirigente")}</strong> desde ${Utils.formatarDataBr(t.ultimaData)}</p>`
-      : `<p class="text-xs text-slate-400 mt-2">📅 Última devolução: ${Utils.formatarDataBr(t.ultimaData)}</p>`;
+      ? `<p class="text-xs text-[#b06000] font-medium mt-2">👤 Com: <strong>${Utils.escapeHtml(t.dirigente || "Dirigente")}</strong> desde ${Utils.formatarDataBr(t.ultimaData)}</p>`
+      : `<p class="text-xs text-slate-500 mt-2">📅 Última conclusão: <strong>${Utils.formatarDataBr(t.ultimaData)}</strong></p>`;
 
-    let btnPrincipal = "";
+    const infoPredios = qtdPredios > 0
+      ? `<div class="mt-2.5 flex items-center justify-between gap-2 px-3 py-1.5 rounded-xl bg-slate-50 border border-slate-200/80">
+          <span class="text-[11px] font-semibold text-slate-700">🏢 ${qtdPredios} prédio(s) no cartão</span>
+          <button type="button" onclick="MapaTerritorios.abrirModalTerritorio(${num})" class="text-[11px] font-bold text-[#0b57d0] hover:underline">
+            ${t.statusReal === "OCUPADO" ? `${prediosConcluidos}/${qtdPredios} trabalhados →` : "Ver interfones →"}
+          </button>
+        </div>`
+      : `<div class="mt-2.5 px-3 py-1.5 rounded-xl bg-slate-50/60 border border-slate-100 text-[11px] text-slate-400">
+          Residencial horizontal (sem prédios verticais)
+        </div>`;
+
+    let areaAcoes = "";
     if (this.podeSolicitarTerritorio(t)) {
-      btnPrincipal = `
-        <button onclick="App.acaoSolicitar(${Number(t.numero)})" class="flex-1 py-2 px-3 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-semibold text-xs transition">
-          Solicitar
-        </button>`;
+      areaAcoes = `
+        <button type="button" onclick="App.alternarSelecaoTerritorio(${num})"
+          class="flex-1 py-2 px-3 rounded-full text-xs font-semibold transition flex items-center justify-center gap-1.5 ${
+            selecionado
+              ? "bg-[#0b57d0] text-white shadow-xs"
+              : "bg-[#d3e3fd] hover:bg-[#c2d7fc] text-[#041e49]"
+          }">
+          <span>${selecionado ? "✓ Selecionado" : "Selecionar"}</span>
+        </button>
+        <button type="button" onclick="App.acaoSolicitar(${num})"
+          class="py-2 px-3.5 rounded-full border border-[#0b57d0] text-[#0b57d0] hover:bg-[#f0f6ff] font-semibold text-xs transition"
+          title="Solicitar apenas este território imediatamente">
+          Solicitar 1
+        </button>
+      `;
     } else if (t.statusReal === "OCUPADO" && (t.emMinhaPosse || (this.usuarioAtual && this.usuarioAtual.perfil === "ADMIN"))) {
-      btnPrincipal = `
-        <button onclick="App.acaoDevolver(${Number(t.numero)})" class="flex-1 py-2 px-3 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white font-semibold text-xs transition">
-          Devolver
+      areaAcoes = `
+        <button type="button" onclick="App.acaoDevolver(${num})" class="flex-1 m3-btn-filled text-xs">
+          Devolver Território
         </button>`;
     } else if (t.statusReal === "RECENTE") {
-      btnPrincipal = `
-        <button disabled title="Disponível somente após mais de 120 dias da última devolução" class="flex-1 py-2 px-3 rounded-lg bg-slate-800 text-slate-500 font-semibold text-xs cursor-not-allowed">
-          Indisponível (&le; 120 dias)
+      areaAcoes = `
+        <button disabled class="flex-1 py-2 px-3 rounded-full bg-slate-100 text-slate-400 font-semibold text-xs cursor-not-allowed">
+          Em descanso (&le; 120 dias)
         </button>`;
     } else {
-      btnPrincipal = `
-        <button disabled class="flex-1 py-2 px-3 rounded-lg bg-slate-800 text-slate-500 font-semibold text-xs cursor-not-allowed">
-          Ocupado
+      areaAcoes = `
+        <button disabled class="flex-1 py-2 px-3 rounded-full bg-slate-100 text-slate-400 font-semibold text-xs cursor-not-allowed">
+          ${t.statusReal === "OCUPADO" ? "Em Campo" : "Aguardando Fila"}
         </button>`;
     }
 
     const btnMapa = t.wkt
-      ? `<button onclick="MapaTerritorios.abrirModalTerritorio(${Number(t.numero)})" class="py-2 px-3 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-medium transition" title="Visualizar mapa deste território">🗺️ Mapa</button>`
+      ? `<button type="button" onclick="MapaTerritorios.abrirModalTerritorio(${num})" class="py-2 px-3.5 rounded-full bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-semibold transition" title="Abrir mapa e guia de prédios">
+          🗺️ Mapa${qtdPredios ? ` (${qtdPredios})` : ""}
+        </button>`
+      : "";
+
+    const badgeFila = posicaoFila
+      ? `<span class="px-2 py-0.5 text-[10px] font-bold rounded-full bg-[#d3e3fd] text-[#041e49]">#${posicaoFila} da Fila</span>`
       : "";
 
     return `
-      <article class="bg-slate-900 border ${t.emMinhaPosse ? "border-indigo-500/60" : "border-slate-800"} rounded-xl p-4 flex flex-col justify-between shadow-sm">
+      <article class="m3-card p-4 flex flex-col justify-between ${selecionado || t.emMinhaPosse ? "selected-card" : ""}">
         <div>
           <div class="flex items-start justify-between gap-2">
             <div>
-              <span class="text-xs font-semibold text-slate-400 uppercase tracking-wider">${Utils.escapeHtml(t.tipo)}</span>
-              <h4 class="text-base font-bold text-white leading-snug">Território ${Number(t.numero)} — ${Utils.escapeHtml(t.bairro)}</h4>
+              <div class="flex items-center gap-1.5 flex-wrap">
+                <span class="text-[11px] font-semibold text-slate-500 uppercase tracking-wider">${Utils.escapeHtml(t.tipo)}</span>
+                ${badgeFila}
+              </div>
+              <h4 class="text-base font-bold text-slate-900 leading-snug mt-0.5">Território ${num} — ${Utils.escapeHtml(t.bairro)}</h4>
             </div>
-            <span class="px-2.5 py-0.5 text-[10px] font-bold rounded-full border ${badgeClass}">
+            <span class="px-2.5 py-0.5 text-[10px] font-bold rounded-full border shrink-0 ${badgeClass}">
               ${Utils.escapeHtml(statusLabel)}
             </span>
           </div>
           ${infoPosse}
+          ${infoPredios}
         </div>
-        <div class="mt-4 pt-3 border-t border-slate-800/80 flex items-center gap-2">
-          ${btnPrincipal}
+        <div class="mt-4 pt-3 border-t border-slate-100 flex items-center gap-2">
+          ${areaAcoes}
           ${btnMapa}
         </div>
       </article>
     `;
   },
 
+  /**
+   * Solicitação individual ou em lote (até 3 territórios da fila de 5) com Modal Material 3 e tratamento de concorrência 409
+   */
   async acaoSolicitar(numero) {
-    const t = this.territorios.find(item => Number(item.numero) === Number(numero));
-    if (!this.podeSolicitarTerritorio(t)) {
-      Utils.mostrarToast("Este território só pode ficar disponível para solicitação quando tiver mais de 120 dias desde a sua última devolução.", "erro");
+    await this.executarFluxoSolicitacao([Number(numero)]);
+  },
+
+  async acaoSolicitarLote() {
+    const numeros = Array.from(this.territoriosSelecionados).sort((a, b) => a - b);
+    if (!numeros.length) return;
+    await this.executarFluxoSolicitacao(numeros);
+  },
+
+  async executarFluxoSolicitacao(numeros) {
+    if (!numeros.length) return;
+    if (numeros.length > Utils.LIMITE_SELECAO_LOTE) {
+      await ModalM3.alerta({
+        icone: "⚠️",
+        titulo: "Limite de seleção atingido",
+        mensagem: `Você pode solicitar no máximo ${Utils.LIMITE_SELECAO_LOTE} territórios por vez dentre os ${Utils.LIMITE_FILA_EXIBICAO} disponíveis na fila.`
+      });
       return;
     }
-    if (!confirm(`Confirmar solicitação do Território ${numero}?`)) return;
+
+    const objetos = numeros.map(n => this.territorios.find(item => Number(item.numero) === Number(n))).filter(Boolean);
+    for (const t of objetos) {
+      if (!this.podeSolicitarTerritorio(t)) {
+        await ModalM3.alerta({
+          icone: "⏳",
+          titulo: "Território fora da fila de solicitação",
+          mensagem: `O Território ${t.numero} (${t.bairro}) não está disponível nos 5 primeiros da fila no momento.`
+        });
+        return;
+      }
+    }
+
+    const listaHtml = `
+      <div class="space-y-1.5">
+        ${objetos.map(t => `
+          <div class="px-3 py-2 rounded-xl bg-slate-50 border border-slate-200 flex items-center justify-between text-xs">
+            <span class="font-bold text-slate-900">Território ${Number(t.numero)} — ${Utils.escapeHtml(t.bairro)}</span>
+            <span class="text-slate-500">${Array.isArray(t.predios) && t.predios.length ? `🏢 ${t.predios.length} prédio(s)` : Utils.escapeHtml(t.tipo)}</span>
+          </div>
+        `).join("")}
+      </div>`;
+
+    const confirmado = await ModalM3.confirmar({
+      icone: "📌",
+      titulo: objetos.length === 1
+        ? `Solicitar Território ${objetos[0].numero}?`
+        : `Solicitar ${objetos.length} Territórios da Fila?`,
+      mensagem: objetos.length === 1
+        ? `O cartão ficará registrado sob sua responsabilidade imediatamente.`
+        : `Os ${objetos.length} cartões selecionados serão reservados simultaneamente para você.`,
+      detalhesHtml: listaHtml,
+      textoConfirmar: objetos.length === 1 ? "Confirmar Solicitação" : `Solicitar ${objetos.length} Territórios`,
+      textoCancelar: "Cancelar"
+    });
+
+    if (!confirmado) return;
+
     try {
-      Utils.mostrarToast(`Registrando solicitação do território ${numero}...`, "aviso");
-      const res = await ApiClient.request("territorios/solicitar", { numeroTerritorio: numero });
+      Utils.mostrarToast("Verificando disponibilidade e registrando reserva...", "aviso");
+      const res = await ApiClient.request("territorios/solicitar", { numerosTerritorios: numeros });
+      this.territoriosSelecionados.clear();
+      this.atualizarBarraSelecaoFlutuante();
+      Utils.mostrarToast(res.mensagem, "sucesso");
+      await this.sincronizarDados();
+    } catch (err) {
+      // Tratamento de Concorrência (HTTP 409): outro usuário retirou algum dos territórios da fila de 5
+      if (err.codigo === 409) {
+        if (Array.isArray(err.territorios)) {
+          this.aplicarListaTerritoriosServidor(err.territorios);
+        } else {
+          await this.sincronizarDados();
+        }
+        await ModalM3.alerta({
+          icone: "⚡",
+          titulo: "Território retirado por outro dirigente",
+          mensagem: err.message || "Um ou mais territórios selecionados acabaram de ser solicitados por outro usuário. A fila de 5 territórios foi atualizada automaticamente.",
+          textoBotao: "Ver Fila Atualizada"
+        });
+        return;
+      }
+      Utils.mostrarToast(err.message, "erro");
+    }
+  },
+
+  /**
+   * Regra de Devolução em Duas Etapas (Modal M3):
+   * 1. "Confirma que o território foi totalmente completo?"
+   *    - SIM -> Concluído (quarentena 120 dias)
+   *    - NÃO -> Modal com 3 opções:
+   *      * Quadras faltantes -> Concluído (quarentena 120 dias)
+   *      * Prédios não trabalhados -> Concluído (quarentena 120 dias)
+   *      * Não iniciado -> Volta para a fila como DISPONÍVEL sem data de início e sem data de conclusão
+   */
+  async acaoDevolver(numero) {
+    const t = this.territorios.find(item => Number(item.numero) === Number(numero));
+    if (!t) return;
+
+    const decisao = await ModalM3.abrirDevolucaoDuasEtapas(t);
+    if (!decisao) return;
+
+    try {
+      Utils.mostrarToast(`Registrando devolução do Território ${numero}...`, "aviso");
+      const res = await ApiClient.request("territorios/devolver", {
+        numeroTerritorio: Number(numero),
+        foiCompleto: decisao.foiCompleto,
+        motivoNaoCompleto: decisao.motivoNaoCompleto
+      });
       Utils.mostrarToast(res.mensagem, "sucesso");
       await this.sincronizarDados();
     } catch (err) {
@@ -410,13 +687,32 @@ const App = {
     }
   },
 
-  async acaoDevolver(numero) {
-    if (!confirm(`Confirmar a devolução do Território ${numero}?`)) return;
+  /**
+   * Marca ou desmarca um prédio como trabalhado neste ciclo (LGPD-safe: apenas timestamp macro do prédio)
+   */
+  async acaoAlternarPredioTrabalhado(idPredio, numeroTerritorio, trabalhado) {
     try {
-      Utils.mostrarToast(`Registrando devolução do território ${numero}...`, "aviso");
-      const res = await ApiClient.request("territorios/devolver", { numeroTerritorio: numero });
+      const res = await ApiClient.request("predios/marcar-trabalhado", {
+        idPredio,
+        numeroTerritorio: Number(numeroTerritorio),
+        trabalhado: Boolean(trabalhado)
+      });
+
+      const t = this.territorios.find(item => Number(item.numero) === Number(numeroTerritorio));
+      if (t && Array.isArray(t.predios)) {
+        const p = t.predios.find(item => item.idPredio === idPredio);
+        if (p) {
+          p.trabalhadoNesteCiclo = Boolean(res.trabalhado);
+          p.ultimaDataConclusao = res.ultimaDataConclusao || "";
+        }
+      }
+
+      this.renderizarCardsTerritorios();
+      this.renderizarMeusTerritorios();
+      if (MapaTerritorios.territorioModalAtual === Number(numeroTerritorio)) {
+        MapaTerritorios.abrirModalTerritorio(Number(numeroTerritorio), idPredio);
+      }
       Utils.mostrarToast(res.mensagem, "sucesso");
-      await this.sincronizarDados();
     } catch (err) {
       Utils.mostrarToast(err.message, "erro");
     }
@@ -424,28 +720,34 @@ const App = {
 
   async carregarMeuHistorico() {
     const tbody = document.getElementById("tbody-meu-historico");
-    tbody.innerHTML = `<tr><td colspan="4" class="py-4 px-4 text-slate-400">Carregando histórico...</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="4" class="py-4 px-4 text-slate-500">Carregando histórico...</td></tr>`;
     try {
       const res = await ApiClient.request("movimentacoes/minhas");
       const hist = res.historico || [];
       if (!hist.length) {
-        tbody.innerHTML = `<tr><td colspan="4" class="py-4 px-4 text-slate-400">Nenhuma movimentação encontrada para seu usuário.</td></tr>`;
+        tbody.innerHTML = `<tr><td colspan="4" class="py-4 px-4 text-slate-500">Nenhuma movimentação encontrada para seu usuário.</td></tr>`;
         return;
       }
       tbody.innerHTML = hist.map(h => `
-        <tr class="hover:bg-slate-800/40">
-          <td class="py-2.5 px-4 text-slate-300">${Utils.escapeHtml(h.dataFormatada)}</td>
-          <td class="py-2.5 px-4 font-bold text-white">Território ${Number(h.numeroTerritorio)}</td>
+        <tr class="hover:bg-slate-50">
+          <td class="py-2.5 px-4 text-slate-600">${Utils.escapeHtml(h.dataFormatada)}</td>
+          <td class="py-2.5 px-4 font-bold text-slate-900">Território ${Number(h.numeroTerritorio)}</td>
           <td class="py-2.5 px-4">
-            <span class="px-2 py-0.5 rounded text-[10px] font-bold ${h.acao === "Solicitar" ? "bg-amber-500/20 text-amber-300" : "bg-emerald-500/20 text-emerald-300"}">
-              ${Utils.escapeHtml(h.acao)}
+            <span class="px-2.5 py-0.5 rounded-full text-[10px] font-bold ${
+              h.acao === "Solicitar"
+                ? "bg-[#fef7e0] text-[#b06000]"
+                : h.acao === "Cancelado_NaoIniciado"
+                ? "bg-slate-100 text-slate-600"
+                : "bg-[#e6f4ea] text-[#146c2e]"
+            }">
+              ${Utils.escapeHtml(h.acao === "Cancelado_NaoIniciado" ? "Devolvido (Não Iniciado)" : h.acao)}
             </span>
           </td>
-          <td class="py-2.5 px-4 text-slate-400">${Utils.escapeHtml(h.tipo)}</td>
+          <td class="py-2.5 px-4 text-slate-500">${Utils.escapeHtml(h.tipo)}</td>
         </tr>
       `).join("");
     } catch (err) {
-      tbody.innerHTML = `<tr><td colspan="4" class="py-4 px-4 text-rose-400">${Utils.escapeHtml(err.message)}</td></tr>`;
+      tbody.innerHTML = `<tr><td colspan="4" class="py-4 px-4 text-[#b3261e]">${Utils.escapeHtml(err.message)}</td></tr>`;
     }
   },
 
@@ -461,22 +763,22 @@ const App = {
 
       const tbodyUsers = document.getElementById("tbody-admin-usuarios");
       tbodyUsers.innerHTML = this.usuariosAdmin.map((u, idx) => `
-        <tr class="hover:bg-slate-800/40">
-          <td class="py-2 px-3 font-medium text-white">${Utils.escapeHtml(u.nome)}</td>
-          <td class="py-2 px-3 text-slate-300">${Utils.escapeHtml(u.email)}</td>
+        <tr class="hover:bg-slate-50">
+          <td class="py-2 px-3 font-semibold text-slate-900">${Utils.escapeHtml(u.nome)}</td>
+          <td class="py-2 px-3 text-slate-600">${Utils.escapeHtml(u.email)}</td>
           <td class="py-2 px-3">
-            <span class="px-2 py-0.5 rounded text-[10px] font-bold ${u.perfil === "ADMIN" ? "bg-amber-500/20 text-amber-300" : "bg-slate-800 text-slate-300"}">
+            <span class="px-2 py-0.5 rounded-full text-[10px] font-bold ${u.perfil === "ADMIN" ? "bg-[#fef7e0] text-[#b06000]" : "bg-slate-100 text-slate-700"}">
               ${Utils.escapeHtml(u.perfil)}
             </span>
           </td>
           <td class="py-2 px-3">
-            <span class="px-2 py-0.5 rounded text-[10px] font-bold ${u.status === "ATIVO" ? "bg-emerald-500/20 text-emerald-300" : "bg-rose-500/20 text-rose-300"}">
+            <span class="px-2 py-0.5 rounded-full text-[10px] font-bold ${u.status === "ATIVO" ? "bg-[#e6f4ea] text-[#146c2e]" : "bg-[#fce8e6] text-[#b3261e]"}">
               ${Utils.escapeHtml(u.status)}
             </span>
           </td>
-          <td class="py-2 px-3 text-slate-400 text-[11px]">${Utils.escapeHtml(u.ultimaAtividade || "-")}</td>
+          <td class="py-2 px-3 text-slate-500 text-[11px]">${Utils.escapeHtml(u.ultimaAtividade || "-")}</td>
           <td class="py-2 px-3">
-            <button onclick="App.preencherFormUsuario(${idx})" class="text-indigo-400 hover:underline font-semibold">Editar</button>
+            <button onclick="App.preencherFormUsuario(${idx})" class="text-[#0b57d0] hover:underline font-semibold">Editar</button>
           </td>
         </tr>
       `).join("");
@@ -484,18 +786,18 @@ const App = {
       const logs = resAudit.logs || [];
       const tbodyAudit = document.getElementById("tbody-admin-auditoria");
       tbodyAudit.innerHTML = logs.map(l => `
-        <tr class="hover:bg-slate-800/40">
-          <td class="py-2 px-3 text-slate-400 whitespace-nowrap">${Utils.escapeHtml(l.dataHora)}</td>
-          <td class="py-2 px-3 text-white">${Utils.escapeHtml(l.usuario)}</td>
-          <td class="py-2 px-3 text-slate-300">${Utils.escapeHtml(l.email)}</td>
-          <td class="py-2 px-3 font-semibold text-indigo-300">${Utils.escapeHtml(l.acao)}</td>
-          <td class="py-2 px-3 text-center">${Utils.escapeHtml(l.territorio)}</td>
+        <tr class="hover:bg-slate-50">
+          <td class="py-2 px-3 text-slate-500 whitespace-nowrap">${Utils.escapeHtml(l.dataHora)}</td>
+          <td class="py-2 px-3 font-medium text-slate-900">${Utils.escapeHtml(l.usuario)}</td>
+          <td class="py-2 px-3 text-slate-600">${Utils.escapeHtml(l.email)}</td>
+          <td class="py-2 px-3 font-semibold text-[#0b57d0]">${Utils.escapeHtml(l.acao)}</td>
+          <td class="py-2 px-3 text-center text-slate-700">${Utils.escapeHtml(l.territorio)}</td>
           <td class="py-2 px-3">
-            <span class="px-2 py-0.5 rounded text-[10px] font-bold ${l.resultado === "SUCESSO" ? "bg-emerald-500/20 text-emerald-300" : "bg-rose-500/20 text-rose-300"}">
+            <span class="px-2 py-0.5 rounded-full text-[10px] font-bold ${l.resultado === "SUCESSO" ? "bg-[#e6f4ea] text-[#146c2e]" : "bg-[#fce8e6] text-[#b3261e]"}">
               ${Utils.escapeHtml(l.resultado)}
             </span>
           </td>
-          <td class="py-2 px-3 text-slate-400">${Utils.escapeHtml(l.detalhes)}</td>
+          <td class="py-2 px-3 text-slate-500">${Utils.escapeHtml(l.detalhes)}</td>
         </tr>
       `).join("");
     } catch (err) {
@@ -531,7 +833,15 @@ const App = {
   },
 
   async dispararLembretesAdmin() {
-    if (!confirm("Deseja disparar agora os e-mails de lembrete (com mapas em PDF anexados) para todos os dirigentes que estão com territórios ocupados?")) return;
+    const ok = await ModalM3.confirmar({
+      icone: "📧",
+      titulo: "Disparar lembretes por e-mail?",
+      mensagem: "Serão enviados e-mails consolidados (com os mapas em PDF anexados) para todos os dirigentes que possuem territórios em aberto.",
+      textoConfirmar: "Enviar E-mails",
+      textoCancelar: "Cancelar"
+    });
+    if (!ok) return;
+
     try {
       Utils.mostrarToast("Enviando lembretes consolidados por e-mail...", "aviso");
       const res = await ApiClient.request("admin/lembretes/disparar", {});
@@ -542,11 +852,6 @@ const App = {
     }
   },
 
-  /**
-   * ==========================================================================
-   * ITEM 2: DASHBOARD DE TERRITÓRIOS TRABALHADOS / OCUPADOS
-   * ==========================================================================
-   */
   filtrarDashboardPorDirigente(nomeDirigente) {
     const input = document.getElementById("dash-search-ocupados");
     if (!input) return;
@@ -571,7 +876,6 @@ const App = {
         return Number(a.numero) - Number(b.numero);
       });
 
-    // Contabiliza dirigentes únicos e métricas
     const mapaPorDirigente = {};
     let somaDias = 0;
     let qtdAlerta = 0;
@@ -596,7 +900,6 @@ const App = {
     if (elMedia) elMedia.textContent = `${mediaDias} dias`;
     if (elAlerta) elAlerta.textContent = String(qtdAlerta);
 
-    // Renderiza chips de resumo por dirigente
     const chipsContainer = document.getElementById("dash-resumo-dirigentes");
     const buscaAtual = (document.getElementById("dash-search-ocupados")?.value || "").toLowerCase().trim();
 
@@ -611,20 +914,19 @@ const App = {
           const nomeJs = nome.replace(/\\/g, "\\\\").replace(/'/g, "\\'");
           return `
             <button type="button" onclick="App.filtrarDashboardPorDirigente('${nomeJs}')"
-              class="px-2.5 py-1 rounded-full text-[11px] font-semibold border transition flex items-center gap-1.5 ${
+              class="px-3 py-1 rounded-full text-[11px] font-semibold border transition flex items-center gap-1.5 ${
                 ativo
-                  ? "bg-indigo-600 text-white border-indigo-400"
-                  : "bg-slate-950 text-slate-300 border-slate-800 hover:border-slate-700"
+                  ? "bg-[#0b57d0] text-white border-[#0b57d0]"
+                  : "bg-slate-50 text-slate-700 border-slate-200 hover:bg-slate-100"
               }">
               <span>👤 ${nomeEscapado}</span>
-              <span class="px-1.5 py-0.2 rounded-full text-[10px] bg-slate-800 text-amber-300 font-bold">${qtd}</span>
+              <span class="px-1.5 py-0.2 rounded-full text-[10px] ${ativo ? "bg-white/20 text-white" : "bg-[#fef7e0] text-[#b06000]"} font-bold">${qtd}</span>
             </button>
           `;
         }).join("");
       }
     }
 
-    // Filtra e renderiza linhas da tabela de ocupados
     const tbody = document.getElementById("tbody-dash-ocupados");
     if (!tbody) return;
 
@@ -637,7 +939,7 @@ const App = {
     if (!filtrados.length) {
       tbody.innerHTML = `
         <tr>
-          <td colspan="6" class="py-8 px-4 text-center text-slate-400 text-xs">
+          <td colspan="6" class="py-8 px-4 text-center text-slate-500 text-xs">
             Nenhum território ocupado encontrado para o filtro informado.
           </td>
         </tr>`;
@@ -645,35 +947,36 @@ const App = {
     }
 
     tbody.innerHTML = filtrados.map(t => {
-      let badgeTempoClass = "bg-emerald-500/15 text-emerald-300 border-emerald-500/30";
+      let badgeTempoClass = "bg-[#e6f4ea] text-[#146c2e] border-[#a8dab5]";
       if (t.diasEmPosse > 60) {
-        badgeTempoClass = "bg-rose-500/20 text-rose-300 border-rose-500/40";
+        badgeTempoClass = "bg-[#fce8e6] text-[#b3261e] border-[#f6aea9]";
       } else if (t.diasEmPosse >= 30) {
-        badgeTempoClass = "bg-amber-500/20 text-amber-300 border-amber-500/40";
+        badgeTempoClass = "bg-[#fef7e0] text-[#b06000] border-[#f5d087]";
       }
 
+      const qtdPredios = Array.isArray(t.predios) ? t.predios.length : 0;
       const btnMapa = t.wkt
-        ? `<button onclick="MapaTerritorios.abrirModalTerritorio(${Number(t.numero)})" class="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-[11px] font-medium transition">🗺️ Mapa</button>`
+        ? `<button onclick="MapaTerritorios.abrirModalTerritorio(${Number(t.numero)})" class="px-3 py-1 rounded-full bg-slate-100 hover:bg-slate-200 text-slate-700 text-[11px] font-semibold transition">🗺️ Mapa${qtdPredios ? ` (${qtdPredios})` : ""}</button>`
         : "";
 
       const podeDevolver = t.emMinhaPosse || (this.usuarioAtual && this.usuarioAtual.perfil === "ADMIN");
       const btnDevolver = podeDevolver
-        ? `<button onclick="App.acaoDevolver(${Number(t.numero)})" class="px-2.5 py-1 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-[11px] font-semibold transition">Devolver</button>`
+        ? `<button onclick="App.acaoDevolver(${Number(t.numero)})" class="px-3 py-1 rounded-full bg-[#0b57d0] hover:bg-[#0842a0] text-white text-[11px] font-semibold transition">Devolver</button>`
         : "";
 
       return `
-        <tr class="hover:bg-slate-800/40">
+        <tr class="hover:bg-slate-50">
           <td class="py-2.5 px-4">
-            <span class="font-bold text-white">Território ${Number(t.numero)}</span>
-            <span class="block text-[11px] text-slate-400">${Utils.escapeHtml(t.bairro)}</span>
+            <span class="font-bold text-slate-900">Território ${Number(t.numero)}</span>
+            <span class="block text-[11px] text-slate-500">${Utils.escapeHtml(t.bairro)}</span>
           </td>
-          <td class="py-2.5 px-4 text-slate-300">${Utils.escapeHtml(t.tipo)}</td>
+          <td class="py-2.5 px-4 text-slate-600">${Utils.escapeHtml(t.tipo)}</td>
           <td class="py-2.5 px-4">
-            <span class="font-semibold text-amber-300">👤 ${Utils.escapeHtml(t.dirigente || "Dirigente")}</span>
+            <span class="font-semibold text-[#b06000]">👤 ${Utils.escapeHtml(t.dirigente || "Dirigente")}</span>
           </td>
-          <td class="py-2.5 px-4 text-slate-300 whitespace-nowrap">${Utils.formatarDataBr(t.ultimaData)}</td>
+          <td class="py-2.5 px-4 text-slate-600 whitespace-nowrap">${Utils.formatarDataBr(t.ultimaData)}</td>
           <td class="py-2.5 px-4 whitespace-nowrap">
-            <span class="px-2 py-0.5 rounded-full text-[10px] font-bold border ${badgeTempoClass}">
+            <span class="px-2.5 py-0.5 rounded-full text-[10px] font-bold border ${badgeTempoClass}">
               ${t.diasEmPosse} dia(s)
             </span>
           </td>
@@ -686,18 +989,11 @@ const App = {
     }).join("");
   },
 
-  /**
-   * ==========================================================================
-   * ITEM 1: RELATÓRIO EM PDF DO REGISTRO DE TERRITÓRIOS POR ANO DE SERVIÇO
-   * (Período: 01/09/AAAA até 31/08/AAAA+1 e assim sucessivamente)
-   * ==========================================================================
-   */
   inicializarSeletorAnoServico() {
     const select = document.getElementById("select-ano-servico");
     if (!select) return;
 
     const anos = Utils.obterAnosDeServicoDisponiveis();
-    // Seleciona por padrão 2025/2026 (01/09/2025 a 31/08/2026) ou o ano vigente
     const anoPadrao = anos.find(a => a.vigente) || anos.find(a => a.anoInicio === 2025) || anos[0];
 
     select.innerHTML = anos.map(a => `
@@ -708,7 +1004,6 @@ const App = {
   },
 
   async obterCiclosHistoricosParaRelatorio(anoInicio) {
-    // 1. Se territorios/listar já trouxe 'ciclos' do backend atualizado, usa diretamente
     const possuiCiclosEmbutidos = this.territorios.some(t => Array.isArray(t.ciclos));
     if (possuiCiclosEmbutidos) {
       return [...this.territorios]
@@ -721,7 +1016,6 @@ const App = {
         }));
     }
 
-    // 2. Tenta consultar a rota dedicada 'relatorios/ano-servico'
     try {
       const res = await ApiClient.request("relatorios/ano-servico", { anoInicio });
       if (res && res.relatorio && Array.isArray(res.relatorio.territorios)) {
@@ -729,73 +1023,14 @@ const App = {
       }
     } catch (e) {}
 
-    // 3. Fallback inteligente caso o backend ainda esteja na versão anterior:
-    // Reconstrói os ciclos a partir do histórico disponível e do estado atual dos territórios
-    let movs = [];
-    try {
-      if (this.usuarioAtual && this.usuarioAtual.perfil === "ADMIN") {
-        const resAdmin = await ApiClient.request("admin/dashboard");
-        movs = resAdmin.historicoRecente || [];
-      } else {
-        const resMinhas = await ApiClient.request("movimentacoes/minhas");
-        movs = resMinhas.historico || [];
-      }
-    } catch (e) {}
-
-    const movsPorTerritorio = {};
-    for (const m of movs) {
-      const num = Number(m.numeroTerritorio);
-      if (!num) continue;
-      if (!movsPorTerritorio[num]) movsPorTerritorio[num] = [];
-      const dataBr = String(m.dataFormatada || "").split(" ")[0];
-      movsPorTerritorio[num].push({
-        timestamp: m.timestamp || Utils.obterTimestampData(dataBr),
-        acao: m.acao,
-        dirigente: m.dirigente || "",
-        dataIso: dataBr
-      });
-    }
-
     return [...this.territorios]
       .sort((a, b) => Number(a.numero) - Number(b.numero))
-      .map(t => {
-        const listaMov = (movsPorTerritorio[Number(t.numero)] || []).sort((a, b) => a.timestamp - b.timestamp);
-        const ciclos = [];
-        let aberto = null;
-
-        for (const m of listaMov) {
-          if (m.acao === "Solicitar") {
-            if (aberto) ciclos.push(aberto);
-            aberto = { dirigente: m.dirigente, dataDesignacao: m.dataIso, dataConclusao: "" };
-          } else if (m.acao === "Devolver") {
-            if (aberto) {
-              aberto.dataConclusao = m.dataIso;
-              if (!aberto.dirigente && m.dirigente) aberto.dirigente = m.dirigente;
-              ciclos.push(aberto);
-              aberto = null;
-            } else {
-              ciclos.push({ dirigente: m.dirigente, dataDesignacao: "", dataConclusao: m.dataIso });
-            }
-          }
-        }
-        if (aberto) ciclos.push(aberto);
-
-        // Garante também o último registro consolidado do território caso não estivesse nos logs recentes
-        if (!ciclos.length && t.ultimaData) {
-          if (t.statusReal === "OCUPADO") {
-            ciclos.push({ dirigente: t.dirigente || "Dirigente", dataDesignacao: t.ultimaData, dataConclusao: "" });
-          } else {
-            ciclos.push({ dirigente: t.dirigente || "-", dataDesignacao: "", dataConclusao: t.ultimaData });
-          }
-        }
-
-        return {
-          numero: t.numero,
-          bairro: t.bairro,
-          tipo: t.tipo,
-          ciclos: Utils.filtrarCiclosPorAnoServico(ciclos, anoInicio)
-        };
-      });
+      .map(t => ({
+        numero: t.numero,
+        bairro: t.bairro,
+        tipo: t.tipo,
+        ciclos: Utils.filtrarCiclosPorAnoServico(t.ciclos || [], anoInicio)
+      }));
   },
 
   async exportarRelatorioPdfAnoServico() {
@@ -849,7 +1084,11 @@ const App = {
 
     const janelaPdf = window.open("", "_blank");
     if (!janelaPdf) {
-      Utils.mostrarToast("Permita pop-ups no navegador para visualizar e salvar o PDF.", "erro");
+      await ModalM3.alerta({
+        icone: "🖨️",
+        titulo: "Pop-up bloqueado pelo navegador",
+        mensagem: "Permita a abertura de janelas pop-up para este site para visualizar e salvar o relatório em PDF."
+      });
       return;
     }
 
@@ -861,7 +1100,7 @@ const App = {
   <style>
     * { box-sizing: border-box; }
     body {
-      font-family: "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      font-family: "Inter", "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
       color: #0f172a;
       background: #f8fafc;
       margin: 0;
@@ -874,7 +1113,7 @@ const App = {
       background: #0f172a;
       color: #f8fafc;
       padding: 12px 16px;
-      border-radius: 10px;
+      border-radius: 12px;
       display: flex;
       align-items: center;
       justify-content: space-between;
@@ -883,12 +1122,12 @@ const App = {
     .toolbar button {
       cursor: pointer;
       border: none;
-      padding: 8px 14px;
-      border-radius: 6px;
+      padding: 8px 16px;
+      border-radius: 999px;
       font-weight: 700;
       font-size: 12px;
     }
-    .btn-print { background: #4f46e5; color: #ffffff; }
+    .btn-print { background: #0b57d0; color: #ffffff; }
     .btn-close { background: #334155; color: #e2e8f0; }
     .sheet {
       max-width: 960px;
@@ -896,7 +1135,7 @@ const App = {
       background: #ffffff;
       padding: 28px;
       border: 1px solid #cbd5e1;
-      border-radius: 8px;
+      border-radius: 12px;
     }
     .header {
       border-bottom: 2px solid #0f172a;
@@ -925,7 +1164,7 @@ const App = {
     }
     .kpi {
       border: 1px solid #cbd5e1;
-      border-radius: 6px;
+      border-radius: 8px;
       padding: 8px 12px;
       background: #f8fafc;
     }
@@ -972,7 +1211,7 @@ const App = {
 <body>
   <div class="toolbar">
     <div>
-      <strong>Relatório Pronto (${periodoStr})</strong> — Clique em "Salvar como PDF / Imprimir" e escolha o destino "Salvar como PDF".
+      <strong>Relatório Pronto (${periodoStr})</strong> — Clique em "Salvar como PDF / Imprimir".
     </div>
     <div>
       <button class="btn-print" onclick="window.print()">🖨️ Salvar como PDF / Imprimir</button>

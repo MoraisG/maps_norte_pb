@@ -110,11 +110,15 @@ function rotearRequisicao(metodo, queryParams, body) {
 
       case "territorios/solicitar":
         if (metodo !== "POST") return erroMetodoNaoPermitido();
-        return executarComLock(() => solicitarTerritorioTransacional(usuario, payload.numeroTerritorio));
+        return executarComLock(() => solicitarTerritorioTransacional(usuario, payload));
 
       case "territorios/devolver":
         if (metodo !== "POST") return erroMetodoNaoPermitido();
-        return executarComLock(() => devolverTerritorioTransacional(usuario, payload.numeroTerritorio, payload.observacao));
+        return executarComLock(() => devolverTerritorioTransacional(usuario, payload));
+
+      case "predios/marcar-trabalhado":
+        if (metodo !== "POST") return erroMetodoNaoPermitido();
+        return executarComLock(() => alternarPredioTrabalhadoTransacional(usuario, payload));
 
       // --- DOMÍNIO: MOVIMENTAÇÕES E RELATÓRIOS ---
       case "movimentacoes/minhas":
@@ -553,8 +557,18 @@ function listarTodosTerritoriosConsolidados(usuarioSolicitante) {
       emMinhaPosse: emPosseDoUsuarioAtual,
       nomePdf: (mapaPdf[num] && mapaPdf[num].nomePdf) || `Mapa_PatoBranco_${infoBase.bairro}_${num}.pdf`,
       wkt: infoBase.wkt,
-      ciclos: ciclos
+      ciclos: ciclos,
+      predios: [],
+      totalPredios: 0
     });
+  }
+
+  // Anexar prédios georreferenciados da Congregação Norte (descartando qualquer item fora dos 94 territórios ativos)
+  const mapaPredios = carregarPrediosPorTerritorio(ss, todosNumerosSet);
+  for (let i = 0; i < resultado.length; i++) {
+    const listaP = mapaPredios[String(resultado[i].numero)] || [];
+    resultado[i].predios = listaP;
+    resultado[i].totalPredios = listaP.length;
   }
 
   // Ordenação padrão por antiguidade (nunca trabalhados ou devolvidos há mais tempo primeiro)
@@ -595,35 +609,65 @@ function executarComLock(callbackTransacional) {
   }
 }
 
-function solicitarTerritorioTransacional(usuario, numeroRaw) {
-  const num = String(numeroRaw || "").trim().replace(/^0+/, "");
-  if (!num || isNaN(Number(num))) {
-    return respostaJson({ sucesso: false, codigo: 400, erro: "Número de território inválido." });
+function solicitarTerritorioTransacional(usuario, payload) {
+  let listaBruta = [];
+  if (payload && Array.isArray(payload.numerosTerritorios)) {
+    listaBruta = payload.numerosTerritorios;
+  } else if (payload && payload.numeroTerritorio !== undefined) {
+    listaBruta = [payload.numeroTerritorio];
+  } else if (typeof payload === "number" || typeof payload === "string") {
+    listaBruta = [payload];
+  }
+
+  const numeros = Array.from(new Set(
+    listaBruta
+      .map(n => String(n || "").trim().replace(/^0+/, ""))
+      .filter(n => n && !isNaN(Number(n)))
+  ));
+
+  if (numeros.length === 0) {
+    return respostaJson({ sucesso: false, codigo: 400, erro: "Selecione ao menos 1 território válido." });
+  }
+  if (numeros.length > 3) {
+    return respostaJson({ sucesso: false, codigo: 400, erro: "Você pode selecionar no máximo 3 territórios por solicitação." });
   }
 
   const todos = listarTodosTerritoriosConsolidados(usuario);
-  const territorio = todos.find(t => String(t.numero) === num);
+  const selecionados = [];
+  const conflitos = [];
 
-  if (!territorio) {
-    registrarAuditoria("SOLICITAR_TERRITORIO", usuario.nome, usuario.email, num, "ERRO", "Território inexistente");
-    return respostaJson({ sucesso: false, codigo: 404, erro: `O território ${num} não existe na base.` });
+  for (const num of numeros) {
+    const territorio = todos.find(t => String(t.numero) === num);
+    if (!territorio) {
+      registrarAuditoria("SOLICITAR_TERRITORIO", usuario.nome, usuario.email, num, "ERRO", "Território inexistente");
+      return respostaJson({ sucesso: false, codigo: 404, erro: `O território ${num} não existe na base.` });
+    }
+    if (territorio.statusReal !== "DISPONÍVEL") {
+      conflitos.push({
+        numero: territorio.numero,
+        bairro: territorio.bairro,
+        statusReal: territorio.statusReal,
+        dirigente: territorio.dirigente || "",
+        ultimaData: territorio.ultimaData || ""
+      });
+    } else {
+      selecionados.push(territorio);
+    }
   }
 
-  if (territorio.statusReal === "OCUPADO") {
-    registrarAuditoria("SOLICITAR_TERRITORIO", usuario.nome, usuario.email, num, "NEGADO_CONCORRENCIA", `Já ocupado por ${territorio.dirigente}`);
+  if (conflitos.length > 0) {
+    const descConflitos = conflitos.map(c =>
+      c.statusReal === "OCUPADO"
+        ? `T-${c.numero} (${c.bairro} - já retirado por ${c.dirigente || "outro dirigente"})`
+        : `T-${c.numero} (${c.bairro} - em quarentena de ${CONFIG.DIAS_RECENTE} dias)`
+    ).join(", ");
+    registrarAuditoria("SOLICITAR_TERRITORIO", usuario.nome, usuario.email, numeros.join(","), "NEGADO_CONCORRENCIA", descConflitos);
     return respostaJson({
       sucesso: false,
       codigo: 409,
-      erro: `Indisponível: o território ${num} (${territorio.bairro}) já está em posse de ${territorio.dirigente}.`
-    });
-  }
-
-  if (territorio.statusReal !== "DISPONÍVEL") {
-    registrarAuditoria("SOLICITAR_TERRITORIO", usuario.nome, usuario.email, num, "NEGADO_QUARENTENA", `Última devolução em ${territorio.ultimaData} (<= ${CONFIG.DIAS_RECENTE} dias)`);
-    return respostaJson({
-      sucesso: false,
-      codigo: 409,
-      erro: `Indisponível: o território ${num} (${territorio.bairro}) foi devolvido recentemente (${territorio.ultimaData}) e só pode ser solicitado após mais de ${CONFIG.DIAS_RECENTE} dias.`
+      erro: `Indisponível por concorrência ou quarentena: ${descConflitos}. A fila foi atualizada automaticamente.`,
+      conflitos: conflitos,
+      territorios: todos
     });
   }
 
@@ -632,32 +676,51 @@ function solicitarTerritorioTransacional(usuario, numeroRaw) {
   const agora = new Date();
   const dataSomente = new Date(agora.getFullYear(), agora.getMonth(), agora.getDate());
 
-  sheetResp.appendRow([
-    agora,
-    usuario.nome,
-    Number(num),
-    "Solicitar",
-    dataSomente,
-    usuario.email,
-    territorio.tipo || "Cidade",
-    "",
-    ""
-  ]);
+  for (const territorio of selecionados) {
+    sheetResp.appendRow([
+      agora,
+      usuario.nome,
+      Number(territorio.numero),
+      "Solicitar",
+      dataSomente,
+      usuario.email,
+      territorio.tipo || "Cidade",
+      "",
+      ""
+    ]);
+  }
 
   SpreadsheetApp.flush();
-  atualizarUltimaAtividadeUsuario(usuario.email, `Solicitou T-${num}`);
-  registrarAuditoria("SOLICITAR_TERRITORIO", usuario.nome, usuario.email, num, "SUCESSO", `Bairro: ${territorio.bairro}`);
+  const resumoNums = selecionados.map(t => `T-${t.numero}`).join(", ");
+  atualizarUltimaAtividadeUsuario(usuario.email, `Solicitou ${resumoNums}`);
+  registrarAuditoria("SOLICITAR_TERRITORIO", usuario.nome, usuario.email, selecionados.map(t => t.numero).join(","), "SUCESSO", `Territórios reservados: ${resumoNums}`);
 
   return respostaJson({
     sucesso: true,
-    mensagem: `Território ${num} (${territorio.bairro}) reservado com sucesso para ${usuario.nome}!`
+    numerosReservados: selecionados.map(t => t.numero),
+    mensagem: selecionados.length === 1
+      ? `Território ${selecionados[0].numero} (${selecionados[0].bairro}) reservado com sucesso para ${usuario.nome}!`
+      : `${selecionados.length} territórios (${resumoNums}) reservados com sucesso para ${usuario.nome}!`
   });
 }
 
-function devolverTerritorioTransacional(usuario, numeroRaw, observacao) {
+function devolverTerritorioTransacional(usuario, payload) {
+  const numeroRaw = (payload && payload.numeroTerritorio !== undefined) ? payload.numeroTerritorio : payload;
   const num = String(numeroRaw || "").trim().replace(/^0+/, "");
   if (!num || isNaN(Number(num))) {
     return respostaJson({ sucesso: false, codigo: 400, erro: "Número de território inválido." });
+  }
+
+  const foiCompleto = (payload && typeof payload.foiCompleto === "boolean") ? payload.foiCompleto : true;
+  const motivoRaw = String((payload && (payload.motivoNaoCompleto || payload.observacao)) || "").toUpperCase().trim();
+  const MOTIVOS_PERMITIDOS = ["QUADRAS_FALTANTES", "PREDIOS_NAO_TRABALHADOS", "NAO_INICIADO"];
+
+  if (!foiCompleto && MOTIVOS_PERMITIDOS.indexOf(motivoRaw) === -1) {
+    return respostaJson({
+      sucesso: false,
+      codigo: 400,
+      erro: "Selecione um motivo válido para a devolução parcial ou não iniciada."
+    });
   }
 
   const todos = listarTodosTerritoriosConsolidados(usuario);
@@ -676,7 +739,6 @@ function devolverTerritorioTransacional(usuario, numeroRaw, observacao) {
     });
   }
 
-  // Teste 5 Obrigatório do Plano v2: Publicador comum só pode devolver território que está sob sua posse
   if (usuario.perfil !== "ADMIN" && !territorio.emMinhaPosse) {
     registrarAuditoria("DEVOLVER_TERRITORIO_ALHEIO", usuario.nome, usuario.email, num, "NEGADO", `Pertence a ${territorio.dirigente}`);
     return respostaJson({
@@ -691,6 +753,43 @@ function devolverTerritorioTransacional(usuario, numeroRaw, observacao) {
   const agora = new Date();
   const dataSomente = new Date(agora.getFullYear(), agora.getMonth(), agora.getDate());
 
+  // Regra "Não Iniciado": cancela a solicitação aberta sem gerar data de início nem de conclusão,
+  // retornando imediatamente à fila como DISPONÍVEL com sua antiguidade original preservada.
+  if (!foiCompleto && motivoRaw === "NAO_INICIADO") {
+    const dadosResp = sheetResp.getDataRange().getValues();
+    let linhaSolicitacaoAberta = -1;
+    let maxTs = -1;
+
+    for (let i = dadosResp.length - 1; i >= 1; i--) {
+      const nLinha = String(dadosResp[i][2] || "").trim().replace(/^0+/, "");
+      const acaoLinha = String(dadosResp[i][3] || "").trim();
+      if (nLinha === num && acaoLinha === "Solicitar") {
+        const tsLinha = extrairTimestamp(dadosResp[i][0]) || extrairTimestamp(dadosResp[i][4]) || i;
+        if (tsLinha >= maxTs) {
+          maxTs = tsLinha;
+          linhaSolicitacaoAberta = i + 1;
+        }
+      }
+    }
+
+    if (linhaSolicitacaoAberta > 0) {
+      sheetResp.getRange(linhaSolicitacaoAberta, 4).setValue("Cancelado_NaoIniciado");
+      sheetResp.getRange(linhaSolicitacaoAberta, 9).setValue("NAO_INICIADO");
+    }
+
+    resetarPrediosDoTerritorio(ss, num);
+    SpreadsheetApp.flush();
+    atualizarUltimaAtividadeUsuario(usuario.email, `Devolveu T-${num} (Não Iniciado)`);
+    registrarAuditoria("DEVOLVER_NAO_INICIADO", usuario.nome, usuario.email, num, "SUCESSO", "Retornou para a fila como DISPONÍVEL sem datas de início/conclusão");
+
+    return respostaJson({
+      sucesso: true,
+      statusRetorno: "DISPONÍVEL",
+      mensagem: `O território ${num} (${territorio.bairro}) retornou imediatamente para a fila de disponíveis (Não Iniciado).`
+    });
+  }
+
+  const tagFechada = foiCompleto ? "COMPLETO" : motivoRaw;
   sheetResp.appendRow([
     agora,
     usuario.nome,
@@ -700,16 +799,18 @@ function devolverTerritorioTransacional(usuario, numeroRaw, observacao) {
     usuario.email,
     territorio.tipo || "Cidade",
     "",
-    String(observacao || "").trim()
+    tagFechada
   ]);
 
+  resetarPrediosDoTerritorio(ss, num);
   SpreadsheetApp.flush();
-  atualizarUltimaAtividadeUsuario(usuario.email, `Devolveu T-${num}`);
-  registrarAuditoria("DEVOLVER_TERRITORIO", usuario.nome, usuario.email, num, "SUCESSO", `Devolvido por ${usuario.email}`);
+  atualizarUltimaAtividadeUsuario(usuario.email, `Devolveu T-${num} (${tagFechada})`);
+  registrarAuditoria("DEVOLVER_TERRITORIO", usuario.nome, usuario.email, num, "SUCESSO", `Tag: ${tagFechada} | Devolvido por ${usuario.email}`);
 
   return respostaJson({
     sucesso: true,
-    mensagem: `Devolução do território ${num} (${territorio.bairro}) registrada com sucesso!`
+    statusRetorno: "RECENTE",
+    mensagem: `Devolução do território ${num} (${territorio.bairro}) registrada como concluída! O cartão entrou no ciclo de descanso de ${CONFIG.DIAS_RECENTE} dias.`
   });
 }
 
@@ -1129,5 +1230,396 @@ function processarInspecaoSeguraPlanilha(payload) {
     });
   }
 
+  if (operacao === "inicializar-predios") {
+    const sheetPredios = inicializarOuObterAbaPredios(ss);
+    const total = Math.max(0, sheetPredios.getLastRow() - 1);
+    registrarAuditoria("INICIALIZAR_ABA_PREDIOS", "CLI/Agente", "automacao@local", "-", "SUCESSO", `Total prédios: ${total}`);
+    return respostaJson({
+      sucesso: true,
+      aba: "Predios",
+      totalPredios: total
+    });
+  }
+
   return respostaJson({ sucesso: false, codigo: 400, erro: `Operação '${operacao}' não reconhecida.` });
 }
+
+/**
+ * ============================================================================
+ * CAMADA 11: GESTÃO DE PRÉDIOS POR TERRITÓRIO (CONFORMIDADE LGPD PRIVACY BY DESIGN)
+ * ============================================================================
+ * - Armazena exclusivamente metadados logísticos do edifício e data macro de conclusão.
+ * - Descarta automaticamente qualquer registro fora dos 94 territórios ativos da Congregação Norte.
+ */
+function inicializarOuObterAbaPredios(ss) {
+  let sheet = ss.getSheetByName("Predios");
+  if (!sheet) {
+    sheet = ss.insertSheet("Predios");
+    sheet.appendRow([
+      "IdPredio",
+      "NumeroTerritorio",
+      "NomeEdificio",
+      "Endereco",
+      "Andares",
+      "Apartamentos",
+      "TipoInterfone",
+      "TagsLogisticas",
+      "ReferenciaComercial",
+      "Latitude",
+      "Longitude",
+      "UltimaDataConclusao"
+    ]);
+    if (PREDIOS_SEMENTE_NORTE.length > 0) {
+      const linhasIniciais = PREDIOS_SEMENTE_NORTE.map(r => [
+        r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7], r[8], r[9], r[10], ""
+      ]);
+      sheet.getRange(2, 1, linhasIniciais.length, 12).setValues(linhasIniciais);
+    }
+    SpreadsheetApp.flush();
+  }
+  return sheet;
+}
+
+function carregarPrediosPorTerritorio(ss, territoriosAtivosSet) {
+  const sheet = inicializarOuObterAbaPredios(ss);
+  const dados = sheet.getDataRange().getValues();
+  const fuso = Session.getScriptTimeZone();
+  const porTerritorio = {};
+
+  for (let i = 1; i < dados.length; i++) {
+    const idPredio = String(dados[i][0] || "").trim();
+    const numTerr = String(dados[i][1] || "").trim().replace(/^0+/, "");
+    if (!idPredio || !numTerr) continue;
+
+    // Descarta estritamente qualquer prédio cujo território não pertença aos 94 cartões ativos da Congregação Norte
+    if (territoriosAtivosSet && !territoriosAtivosSet.has(numTerr)) continue;
+
+    const tagsRaw = String(dados[i][7] || "").trim();
+    const dtConclRaw = dados[i][11];
+    let ultimaDataConclusao = "";
+    if (dtConclRaw) {
+      const ts = extrairTimestamp(dtConclRaw);
+      ultimaDataConclusao = ts ? Utilities.formatDate(new Date(ts), fuso, "yyyy-MM-dd") : String(dtConclRaw).trim();
+    }
+
+    if (!porTerritorio[numTerr]) porTerritorio[numTerr] = [];
+    porTerritorio[numTerr].push({
+      idPredio: idPredio,
+      numeroTerritorio: Number(numTerr),
+      nomeEdificio: String(dados[i][2] || "Edifício s/ nome").trim(),
+      endereco: String(dados[i][3] || "").trim(),
+      andares: Number(dados[i][4] || 0),
+      apartamentos: Number(dados[i][5] || 0),
+      tipoInterfone: String(dados[i][6] || "NAO_INFORMADO").trim(),
+      tagsLogisticas: tagsRaw ? tagsRaw.split(",").map(s => s.trim()).filter(Boolean) : [],
+      referenciaComercial: String(dados[i][8] || "").trim(),
+      latitude: Number(dados[i][9] || 0),
+      longitude: Number(dados[i][10] || 0),
+      ultimaDataConclusao: ultimaDataConclusao,
+      trabalhadoNesteCiclo: Boolean(ultimaDataConclusao)
+    });
+  }
+
+  return porTerritorio;
+}
+
+function alternarPredioTrabalhadoTransacional(usuario, payload) {
+  const idPredio = String((payload && payload.idPredio) || "").trim();
+  const numTerr = String((payload && payload.numeroTerritorio) || "").trim().replace(/^0+/, "");
+  const trabalhado = Boolean(payload && payload.trabalhado);
+
+  if (!idPredio || !numTerr) {
+    return respostaJson({ sucesso: false, codigo: 400, erro: "Identificador do prédio e território são obrigatórios." });
+  }
+
+  const todos = listarTodosTerritoriosConsolidados(usuario);
+  const territorio = todos.find(t => String(t.numero) === numTerr);
+  if (!territorio) {
+    return respostaJson({ sucesso: false, codigo: 404, erro: "Território não encontrado." });
+  }
+
+  if (usuario.perfil !== "ADMIN" && (!territorio.emMinhaPosse || territorio.statusReal !== "OCUPADO")) {
+    return respostaJson({
+      sucesso: false,
+      codigo: 403,
+      erro: "Apenas o dirigente que está com o território em mãos (ou um Administrador) pode marcar prédios trabalhados."
+    });
+  }
+
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheet = inicializarOuObterAbaPredios(ss);
+  const dados = sheet.getDataRange().getValues();
+  const dataIso = trabalhado ? Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "yyyy-MM-dd") : "";
+
+  for (let i = 1; i < dados.length; i++) {
+    if (String(dados[i][0] || "").trim() === idPredio) {
+      sheet.getRange(i + 1, 12).setValue(dataIso);
+      SpreadsheetApp.flush();
+      registrarAuditoria(
+        trabalhado ? "PREDIO_TRABALHADO" : "PREDIO_DESMARCADO",
+        usuario.nome,
+        usuario.email,
+        numTerr,
+        "SUCESSO",
+        idPredio + " (" + String(dados[i][2] || "") + ")"
+      );
+      return respostaJson({
+        sucesso: true,
+        idPredio: idPredio,
+        numeroTerritorio: Number(numTerr),
+        trabalhado: trabalhado,
+        ultimaDataConclusao: dataIso,
+        mensagem: trabalhado ? "Prédio marcado como trabalhado neste ciclo!" : "Marcação do prédio removida."
+      });
+    }
+  }
+
+  return respostaJson({ sucesso: false, codigo: 404, erro: "Prédio não encontrado na base da Congregação Norte." });
+}
+
+function resetarPrediosDoTerritorio(ss, numeroTerritorio) {
+  try {
+    const numAlvo = String(numeroTerritorio || "").trim().replace(/^0+/, "");
+    const sheet = ss.getSheetByName("Predios");
+    if (!sheet) return;
+    const dados = sheet.getDataRange().getValues();
+    for (let i = 1; i < dados.length; i++) {
+      const nLinha = String(dados[i][1] || "").trim().replace(/^0+/, "");
+      if (nLinha === numAlvo && dados[i][11]) {
+        sheet.getRange(i + 1, 12).setValue("");
+      }
+    }
+  } catch (e) {
+    Logger.log("Aviso ao resetar prédios do território: " + e.message);
+  }
+}
+
+const PREDIOS_SEMENTE_NORTE = [
+  ["PRD-206",32,"Residencial Leoni","Rua Tapejara, 314",6,0,"EXTERNO","PEDE_NUM_APTO","",-26.222283,-52.674172],
+  ["PRD-207",32,"Ed. Luiza","Rua Tapejara, 320",4,0,"EXTERNO","EXIGE_CODIGO","",-26.222238,-52.674189],
+  ["PRD-208",32,"Ed. Ana Luiza","Trav. Tapejara, 346",7,0,"EXTERNO","SEM_ACESSO,EXIGE_CODIGO","",-26.223348,-52.673036],
+  ["PRD-209",32,"Ed. Maria Maria","Rua Tapajós, 827",4,0,"NAO_INFORMADO","DOIS_BLOCOS","",-26.221815,-52.673145],
+  ["PRD-212",32,"Residencial Delta","Rua Tapajós, 656",7,0,"EXTERNO","SEM_ACESSO,EXIGE_CODIGO","",-26.222576,-52.672972],
+  ["PRD-019",3,"Condomínio do Ed Resid e Com Osvaldo Pia","Rua Tapajós, 250",4,10,"NAO_INFORMADO","","Sobre a Quitanda do Aroma",-26.224679,-52.672422],
+  ["PRD-021",3,"Edificio da Raffer","Rua Itabira, 1343",4,0,"NAO_INFORMADO","","",-26.224126,-52.671824],
+  ["PRD-022",3,"Edificio Frei Policarpio","Rua Itabira, 1315",19,39,"EXTERNO","SEM_ACESSO","",-26.224203,-52.672054],
+  ["PRD-023",65,"Ed. Ponto Nobre","Rua Caramuru, 700",7,28,"EXTERNO","SEM_ACESSO","",-26.224826,-52.674908],
+  ["PRD-024",3,"Edificio Awada","Avenida Tupi, 2000",4,26,"SEM_INTERFONE","COM_ACESSO","Sobre a barbearia",-26.222718,-52.671491],
+  ["PRD-025",3,"Condominio Galeazzi","Rua Tapir, 1212",2,1,"EXTERNO","","Ao lado da Galeazzi",-26.223008,-52.672113],
+  ["PRD-026",3,"Residencial Awada","Rua Itabira, 1183",0,12,"EXTERNO","SEM_ACESSO","Sobre a lotérica",-26.224735,-52.673355],
+  ["PRD-027",65,"Ed. Ulisses Roldo","Rua Caramuru, 678",3,6,"EXTERNO","SEM_ACESSO","",-26.225218,-52.674673],
+  ["PRD-196",65,"Edifício s/ nome","Rua Guarani, 830",6,0,"EXTERNO","SEM_ACESSO,EXIGE_CODIGO","Sobre a Parzianello Materiais de Construção",-26.222576,-52.675062],
+  ["PRD-203",3,"Ed. Octaviano Marcante","Rua Tapejara, 36",10,0,"NAO_INFORMADO","PEDE_NUM_APTO","Ao lado do nº 61",-26.223702,-52.673624],
+  ["PRD-204",3,"Resid. Janes Tomazi Piacentini","Rua Tapejara, 61",9,0,"EXTERNO","SEM_ACESSO,EXIGE_CODIGO","",-26.223702,-52.673624],
+  ["PRD-205",3,"Residencial Sonté","Rua Tapejara, 138",4,0,"EXTERNO","SEM_ACESSO,EXIGE_CODIGO","",-26.223702,-52.673624],
+  ["PRD-210",32,"Edificio Bruno Ceni","Rua Tapajós, 460",5,0,"EXTERNO","SEM_ACESSO,EXIGE_CODIGO","",-26.223247,-52.672787],
+  ["PRD-211",3,"Ed. Aldemar A. Cattuci","Rua Tapajós, 513",4,0,"EXTERNO","SEM_ACESSO,EXIGE_CODIGO","",-26.223341,-52.672762],
+  ["PRD-028",65,"Prédio Comercial (Salão)","Rua Caramuru, 741",3,0,"EXTERNO","SEM_ACESSO","Sobre o Salão de Beleza",-26.224576,-52.675058],
+  ["PRD-029",65,"Predio Balbinotti","Rua Caramuru, 913",3,1,"EXTERNO","SEM_ACESSO","",-26.223204,-52.675883],
+  ["PRD-030",65,"Edifício s/ nome","Rua Caramuru, 687",3,3,"EXTERNO","SEM_ACESSO","",-26.22507,-52.674762],
+  ["PRD-031",2,"Residencial","Rua Tapir, 785",1,1,"SEM_INTERFONE","SEM_ACESSO","",-26.224879,-52.676074],
+  ["PRD-032",2,"Residencial","Rua Tapir, 623",4,2,"EXTERNO","SEM_ACESSO","",-26.225699,-52.677764],
+  ["PRD-033",38,"Edifício s/ nome","Rua Itabira, 1121",1,1,"EXTERNO","SEM_ACESSO","",-26.224992,-52.673859],
+  ["PRD-034",38,"Edifício s/ nome","Rua Itabira, 939",1,2,"EXTERNO","SEM_ACESSO","",-26.225245,-52.67439],
+  ["PRD-035",38,"Residencial","Rua Itabira, 1099",3,0,"EXTERNO","SEM_ACESSO","Sobre a Mecânica Pagnoncelli",-26.225122,-52.67413],
+  ["PRD-036",2,"Predio Esquina","Rua Tamoio, 1013",1,0,"SEM_INTERFONE","SEM_ACESSO","",-26.225287,-52.676078],
+  ["PRD-037",2,"Residencial Vitória","Rua Tamoio, 1200",3,2,"EXTERNO","SEM_ACESSO","",-26.223794,-52.677041],
+  ["PRD-228",2,"Residencial Alphaville","Rua Tapir, 833",5,0,"EXTERNO","EXIGE_CODIGO,DOIS_BLOCOS","",-26.224668,-52.675644],
+  ["PRD-229",2,"Edifício Monteiro Lobato","Avenida Brasil, 942",5,3,"EXTERNO","EXIGE_CODIGO,COM_CAMERA,DOIS_BLOCOS","",-26.225635,-52.677132],
+  ["PRD-230",2,"Edifício Vasti","Avenida Brasil, 890",8,15,"EXTERNO","COM_CAMERA","",-26.226026,-52.676898],
+  ["PRD-231",38,"Residencial Porto Vitória","Rua Tamoio, 934",8,4,"EXTERNO","COM_CAMERA","",-26.22603,-52.675648],
+  ["PRD-236",38,"Edifício s/ nome","Rua Itabira, 1115",4,0,"EXTERNO","","",-26.225017,-52.673911],
+  ["PRD-238",65,"Edifício s/ nome","Rua Caramuru, 709",9,0,"EXTERNO","SEM_ACESSO","",-26.224771,-52.674941],
+  ["PRD-038",2,"Resid. Otavio Bezzinatto","Rua Osvaldo Aranha, 125",3,3,"EXTERNO","SEM_ACESSO","",-26.223371,-52.677049],
+  ["PRD-240",2,"Edifício Tarsila do Amaral","Rua Tamoio, 1302",6,0,"EXTERNO","COM_CAMERA","",-26.222981,-52.677672],
+  ["PRD-223",12,"Residencial Polarys","Rua Tocantins, 3435",9,0,"EXTERNO","SEM_ACESSO","",-26.217108,-52.670296],
+  ["PRD-242",12,"Residencial Dona Alexandrina","Rua Assis Brasil, 650",4,4,"EXTERNO","SEM_ACESSO,PEDE_NUM_APTO","",-26.218662,-52.671957],
+  ["PRD-243",48,"Edifício s/ nome","Rua Nereu Ramos, 631",4,16,"EXTERNO","SEM_ACESSO","",-26.216857,-52.671438],
+  ["PRD-222",12,"Resid. Luciano de Souza","Rua Tocantins, 3265",8,0,"EXTERNO","SEM_ACESSO","",-26.21835,-52.669758],
+  ["PRD-225",79,"Residencial Cecília Digo","Rua Silveira Martins, 247",8,0,"EXTERNO","","",-26.221042,-52.669831],
+  ["PRD-226",78,"Edifício s/ nome","Rua Brasília, 193",4,0,"EXTERNO","","",-26.22125,-52.66633],
+  ["PRD-227",13,"Edifício Dona Cesira","Rua Salgado Filho, 230",13,0,"EXTERNO","PORTARIA","",-26.220318,-52.666131],
+  ["PRD-001",3,"Predio Hadatur","Rua Tapir, 1967",2,6,"SEM_INTERFONE","ACESSO_RESTRITO","Prédio da Agência Hadatur",-26.222779,-52.671623],
+  ["PRD-002",3,"Edifício Imperatriz","Av. Tupi, 1997",11,61,"EXTERNO","SEM_ACESSO,COM_CAMERA","",-26.222718,-52.671491],
+  ["PRD-003",3,"Edificio Av Central","Av. Tupi, 2015",11,0,"EXTERNO","","",-26.222718,-52.671491],
+  ["PRD-004",35,"Prédio Piacentinp","Rua Itabira",0,1,"SEM_INTERFONE","","",-26.223912,-52.669817],
+  ["PRD-006",35,"Prédio Três Marias","Rua Itabira",10,3,"EXTERNO","COM_ACESSO,COM_CAMERA","",-26.22393,-52.669671],
+  ["PRD-007",48,"Ed. Rio Tãmisa","Rua Carlos Roberto Carraro, 50",4,16,"NAO_INFORMADO","","",-26.215212,-52.670188],
+  ["PRD-008",78,"Edifício Bella Citta","Rua Tocantins, 2740",7,4,"EXTERNO","SEM_ACESSO,EXIGE_CODIGO","",-26.221477,-52.669537],
+  ["PRD-009",24,"Edifício Ômega","Rua Itabira, 1565",6,0,"EXTERNO","SEM_ACESSO,COM_CAMERA","",-26.223895,-52.670501],
+  ["PRD-010",78,"Residencial Montese","Rua Tocantins, 2708",7,0,"EXTERNO","SEM_ACESSO,COM_CAMERA","",-26.221623,-52.669561],
+  ["PRD-011",24,"Ed. Dalla Costa","Rua Itabira, 1695",1,1,"NAO_INFORMADO","","",-26.2239,-52.669931],
+  ["PRD-012",14,"Prédio Esquina","Rua Aimoré, 1011",1,4,"NAO_INFORMADO","","Em frente ao Ed. Ana Terra",-26.222402,-52.667516],
+  ["PRD-013",35,"Ed. ...prina B.","Rua Itabira",0,4,"EXTERNO","COM_ACESSO","",-26.22393,-52.669671],
+  ["PRD-014",24,"Ed. Siena","Rua Itabira",4,8,"SEM_INTERFONE","SEM_ACESSO","",-26.223889,-52.670128],
+  ["PRD-015",3,"Prédio sem nome","Rua Itabira, 1143",0,3,"EXTERNO","COM_ACESSO,COM_CAMERA","",-26.224901,-52.673667],
+  ["PRD-016",38,"Residencial Ana Terra","Rua Itabira, 1020",7,14,"NAO_INFORMADO","","",-26.225161,-52.674212],
+  ["PRD-017",35,"Ed. Angela","Rua Itabira, 1789",4,0,"NAO_INFORMADO","","",-26.223903,-52.669885],
+  ["PRD-018",24,"Ed. Rio Sena","Ladeira do Beto, 67",4,48,"EXTERNO","ACESSO_RESTRITO,PEDE_NUM_APTO,TRES_BLOCOS","",-26.223346,-52.669833],
+  ["PRD-039",24,"Ed. Fanser Modas","Rua Itabira, 1488",2,6,"EXTERNO","PEDE_NUM_APTO","Fundos nº 1488 (frente p/ Av. Tupi)",-26.223902,-52.670987],
+  ["PRD-040",24,"Ed. Maria Angelica","Rua Itabira, 1522",8,24,"EXTERNO","SEM_ACESSO,PEDE_NUM_APTO","",-26.223899,-52.670772],
+  ["PRD-041",24,"Ed. Lucia","Rua Itabira, 1532",3,12,"EXTERNO","SEM_ACESSO","",-26.223898,-52.670709],
+  ["PRD-042",24,"R. Treviso (?)","Rua Itabira, 1680",3,0,"EXTERNO","SEM_ACESSO","",-26.223895,-52.670003],
+  ["PRD-043",24,"R. Piacenza","Rua Itabira, 1650",7,0,"EXTERNO","SEM_ACESSO,COM_CAMERA","",-26.223889,-52.670109],
+  ["PRD-045",24,"R. Milano","Rua Itabira, 1700",3,0,"EXTERNO","SEM_ACESSO","",-26.223901,-52.669906],
+  ["PRD-046",35,"E. Monte Morió","Rua Itabira, 1730",4,0,"EXTERNO","SEM_ACESSO","",-26.223903,-52.669885],
+  ["PRD-047",35,"Edifício Imola","Rua Jaciretã, 240",4,8,"EXTERNO","SEM_ACESSO","",-26.224971,-52.668445],
+  ["PRD-048",35,"Residencial Verona","Rua Jaciretã, 232",5,0,"EXTERNO","SEM_ACESSO,EXIGE_CODIGO","",-26.224978,-52.668374],
+  ["PRD-049",34,"Residencial Florence","Rua Ibiporã, 907",5,11,"NAO_INFORMADO","SEM_ACESSO","",-26.225937,-52.668365],
+  ["PRD-050",34,"Edifício Mônaco","Rua Ibiporã, 913",4,8,"EXTERNO","SEM_ACESSO","",-26.225931,-52.668418],
+  ["PRD-051",72,"Residencial Torino","Rua Ibiporã, 1091",3,14,"EXTERNO","SEM_ACESSO","",-26.22614,-52.666604],
+  ["PRD-052",72,"Residencial Toscana","Rua Ibiporã, 1151",3,23,"EXTERNO","SEM_ACESSO","",-26.226207,-52.666013],
+  ["PRD-053",72,"Residencial Taurus","Rua Tupinambá, 182",7,0,"EXTERNO","SEM_ACESSO,EXIGE_CODIGO","",-26.225194,-52.665701],
+  ["PRD-054",72,"Edifício s/ nome","Rua Tupinambá",3,0,"SEM_INTERFONE","SEM_ACESSO","Sobre o Sublime Pilates",-26.225105,-52.665689],
+  ["PRD-056",35,"Bellario I","Rua Itabira, 1770",6,24,"EXTERNO","SEM_ACESSO,EXIGE_CODIGO","",-26.223903,-52.669885],
+  ["PRD-057",35,"Bellario II","Rua Itabira, 1778",3,24,"EXTERNO","SEM_ACESSO,EXIGE_CODIGO","",-26.223903,-52.669885],
+  ["PRD-058",35,"Predio Maqsom","Rua Itabira",2,0,"EXTERNO","","",-26.224043,-52.668556],
+  ["PRD-059",72,"Ed. Residencial Petra","Rua Itapuã, 961",7,0,"EXTERNO","INTERFONE_DIGITAL","",-26.225158,-52.666845],
+  ["PRD-060",34,"Ed. Dona Frida","Rua Ibiporã, 983",4,8,"EXTERNO","","",-26.225986,-52.667907],
+  ["PRD-061",35,"Ed. condomínio Araucária","Rua Aimoré, 90",3,14,"EXTERNO","","",-26.224834,-52.66787],
+  ["PRD-062",35,"D. Champs Elicés","Rua Jaciretã, 346",4,0,"EXTERNO","EXIGE_CODIGO","",-26.224978,-52.668374],
+  ["PRD-063",35,"Ed. Porto Belo","Rua Jaciretã, 170",4,8,"NAO_INFORMADO","PEDE_NUM_APTO","",-26.224934,-52.6688],
+  ["PRD-064",24,"Residencial Palermo","Rua Itabira, 1630",6,0,"EXTERNO","EXIGE_CODIGO","",-26.223889,-52.670109],
+  ["PRD-065",35,"Residencial Acopillco","Rua Itabira",15,0,"EXTERNO","","",-26.224043,-52.668556],
+  ["PRD-066",35,"Ed. Vitória Piassa","Rua Tocantins, 2362",3,0,"SEM_INTERFONE","SEM_ACESSO","",-26.224579,-52.669969],
+  ["PRD-067",35,"Ed. Jatobá","Rua Tocantins, 2396",7,0,"NAO_INFORMADO","COM_CAMERA","",-26.224285,-52.669932],
+  ["PRD-068",35,"Condominio Ettore","Rua Goianazes, 625",8,0,"EXTERNO","PEDE_NUM_APTO","",-26.224696,-52.668921],
+  ["PRD-069",35,"Ed. Luiz Parzianello","Rua Goianazes, 599",5,0,"NAO_INFORMADO","","",-26.224608,-52.66891],
+  ["PRD-071",24,"Edifício s/ nome","Rua Ibiporã, 688",3,0,"SEM_INTERFONE","SEM_ACESSO","",-26.225669,-52.67099],
+  ["PRD-072",24,"Edifício s/ nome","Rua Ibiporã, 676",0,1,"EXTERNO","","Esquina c/ Av. Tupi (sobre a loja Brincarão)",-26.225657,-52.671119],
+  ["PRD-073",34,"Resid. Barancelli","Rua Ibiporã, 784",6,32,"EXTERNO","PEDE_NUM_APTO","",-26.225771,-52.66991],
+  ["PRD-074",24,"Edifício s/ nome","Rua Ibiporã, 742",3,8,"EXTERNO","SEM_ACESSO,PEDE_NUM_APTO","Sobre a loja Intermezzo",-26.225722,-52.670408],
+  ["PRD-075",3,"Edifício s/ nome","Rua Itabira, 1266",1,0,"NAO_INFORMADO","COM_ACESSO","Sobre clínica odontológica",-26.224354,-52.672509],
+  ["PRD-076",38,"Prédio Pastelaria","Rua Caramuru, 566",1,0,"SEM_INTERFONE","SEM_ACESSO","",-26.226103,-52.674149],
+  ["PRD-078",38,"Edificio Rostirola","Rua Caramuru, 586",6,9,"EXTERNO","","",-26.225887,-52.674277],
+  ["PRD-079",38,"Edificio Monte Oliveiras","Rua Caramuru, 596",8,0,"EXTERNO","SEM_ACESSO","",-26.225783,-52.674338],
+  ["PRD-080",38,"Edificio Aurea","Rua Caramuru, 650",3,7,"EXTERNO","","",-26.22547,-52.674523],
+  ["PRD-081",3,"Prédio Chilli Beans","Rua Guarani, 425",3,0,"NAO_INFORMADO","SEM_ACESSO","",-26.225078,-52.673548],
+  ["PRD-085",3,"Ed. Alberto Carlos Menosso","Rua Ibiporã, 421",2,2,"EXTERNO","SEM_ACESSO,PEDE_NUM_APTO","",-26.225557,-52.672162],
+  ["PRD-086",3,"Prédio Lacqua di Fiori","Rua Ibiporã, 310",1,1,"NAO_INFORMADO","SEM_ACESSO","Entrada lateral (Ed. Atelier Elisa)",-26.225557,-52.672162],
+  ["PRD-087",3,"Lojão Sudoeste","Rua Guarani, 365",3,0,"NAO_INFORMADO","COM_ACESSO","Acesso pela escadaria lateral",-26.225579,-52.673245],
+  ["PRD-088",3,"Edifício s/ nome","Rua Tapajós, 107",4,8,"EXTERNO","SEM_ACESSO","",-26.225517,-52.6722],
+  ["PRD-089",3,"Edifício s/ nome","Rua Ibiporã, 534",1,1,"NAO_INFORMADO","SEM_ACESSO","Sobre a Brasil Cacau",-26.225557,-52.672162],
+  ["PRD-090",3,"Edifício s/ nome","Rua Ibiporã, 490",1,1,"NAO_INFORMADO","COM_ACESSO","Sobre a loja Hering",-26.225557,-52.672162],
+  ["PRD-091",3,"Edifício s/ nome","Rua Ibiporã, 512",1,1,"SEM_INTERFONE","SEM_ACESSO","Em frente ao O Boticário",-26.225557,-52.672162],
+  ["PRD-092",3,"Ed. João Viganó","Rua Tapajós, 104",3,20,"EXTERNO","SEM_ACESSO","",-26.225532,-52.672196],
+  ["PRD-093",39,"Residencial Picolo","Avenida Tupi, 2538",3,0,"EXTERNO","SEM_ACESSO,PEDE_NUM_APTO","",-26.228937,-52.671616],
+  ["PRD-094",3,"Loja Colombo","Avenida Tupi",3,0,"EXTERNO","SEM_ACESSO,PEDE_NUM_APTO","Sobre a Loja Colombo",-26.226493,-52.67133],
+  ["PRD-095",3,"Prédio Boccata","Rua Itabira, 1272",1,1,"SEM_INTERFONE","SEM_ACESSO","Sobre a Boccata",-26.224319,-52.672405],
+  ["PRD-096",3,"Edifício s/ nome","Rua Tapajós, 205",1,0,"SEM_INTERFONE","SEM_ACESSO","Sobre a loja de música",-26.225081,-52.672316],
+  ["PRD-097",3,"Predio Dentistas","Rua Tapajós, 219",4,0,"SEM_INTERFONE","SEM_ACESSO","Edifício de consultórios odontológicos",-26.224956,-52.672349],
+  ["PRD-098",3,"Edifício s/ nome","Avenida Tupi, 141",13,12,"EXTERNO","COM_ACESSO","Em frente à praça",-26.224395,-52.67123],
+  ["PRD-195",3,"Prédio Conti Joias","Rua Guarani, 422",4,7,"EXTERNO","SEM_ACESSO","",-26.225103,-52.673533],
+  ["PRD-213",3,"Edifício s/ nome","Rua Tapajós, 200",4,6,"NAO_INFORMADO","COM_ACESSO","Prédio da Olímpica Esportes",-26.225125,-52.672304],
+  ["PRD-214",3,"Ed. Tapajós","Rua Tapajós, 222",8,18,"EXTERNO","SEM_ACESSO","",-26.224929,-52.672356],
+  ["PRD-215",3,"Residencial Bodanese","Avenida Tupi, 2368",7,24,"EXTERNO","SEM_ACESSO","",-26.226634,-52.67135],
+  ["PRD-216",3,"Ed. Center Ville","Avenida Tupi, 2200",6,0,"NAO_INFORMADO","","Prédio da Icon",-26.224931,-52.671228],
+  ["PRD-246",3,"Edifício s/ nome","Rua Tapajós, 206",3,6,"EXTERNO","SEM_ACESSO","Sobre a sorveteria DG Pop",-26.225072,-52.672318],
+  ["PRD-100",38,"Residencial Alpha","Rua Itabira, 1100",8,0,"EXTERNO","SEM_ACESSO,EXIGE_CODIGO","",-26.225122,-52.67413],
+  ["PRD-102",38,"Residencial Monte Sião","Rua Tamoio, 900",9,0,"EXTERNO","SEM_ACESSO,EXIGE_CODIGO","",-26.226383,-52.675427],
+  ["PRD-103",38,"Residencial Monte Sinai","Rua Tamoio, 836",9,0,"EXTERNO","SEM_ACESSO,EXIGE_CODIGO","",-26.226992,-52.675053],
+  ["PRD-104",38,"Edifício Via Duomo","Rua Tamoio, 845",4,0,"EXTERNO","SEM_ACESSO,EXIGE_CODIGO","",-26.226921,-52.675093],
+  ["PRD-105",38,"Edifício Tamoio","Rua Tamoio, 857",4,8,"EXTERNO","SEM_ACESSO","",-26.22683,-52.675148],
+  ["PRD-106",38,"Resid. Monte Morida","Rua Tamoio, 865",10,0,"EXTERNO","SEM_ACESSO,EXIGE_CODIGO","",-26.226747,-52.6752],
+  ["PRD-107",62,"Edifício Golden Park","Avenida Brasil, 720",3,0,"EXTERNO","SEM_ACESSO,EXIGE_CODIGO","",-26.227316,-52.676144],
+  ["PRD-108",62,"Ed. Monte Tabor","Avenida Brasil, 736",4,0,"EXTERNO","SEM_ACESSO","",-26.227193,-52.676215],
+  ["PRD-109",62,"Resid. Monte Carmelo","Avenida Brasil, 746",11,0,"EXTERNO","EXIGE_CODIGO,DOIS_BLOCOS","Torre 1",-26.227116,-52.67626],
+  ["PRD-110",62,"Resid. Monte Hermon","Avenida Brasil, 756",11,0,"EXTERNO","EXIGE_CODIGO,DOIS_BLOCOS","Torre 2",-26.22704,-52.676304],
+  ["PRD-111",62,"Edifício s/ nome","Avenida Brasil, 773",3,0,"EXTERNO","COM_ACESSO,EXIGE_CODIGO","",-26.22691,-52.676379],
+  ["PRD-112",62,"Edifício Villa Realli","Avenida Brasil, 757",4,36,"EXTERNO","SEM_ACESSO","",-26.227032,-52.676308],
+  ["PRD-113",38,"Condomínio Edifício Imperio do Sol","Rua Caramuru, 599",11,0,"EXTERNO","SEM_ACESSO,EXIGE_CODIGO","Sobre a Barbearia Don Ferdinando",-26.225764,-52.674349],
+  ["PRD-114",38,"Edifício s/ nome","Rua Caramuru, 623",3,4,"EXTERNO","SEM_ACESSO","Sobre o Empório do Pão",-26.225614,-52.674438],
+  ["PRD-115",38,"Edf Estilo Construçoes","Rua Caramuru, 635",3,2,"EXTERNO","COM_ACESSO","",-26.225539,-52.674483],
+  ["PRD-116",3,"Resid. Albino Franciosi","Rua Ibiporã, 101",5,0,"EXTERNO","SEM_ACESSO","",-26.225557,-52.672162],
+  ["PRD-117",3,"Residencial Ibiporã","Rua Ibiporã, 181",7,0,"EXTERNO","SEM_ACESSO,EXIGE_CODIGO","",-26.225557,-52.672162],
+  ["PRD-118",3,"Liberty Center","Rua Ibiporã, 283",4,24,"EXTERNO","SEM_ACESSO","",-26.225557,-52.672162],
+  ["PRD-217",39,"Edifício s/ nome","Rua Tamoio, s/n",9,36,"NAO_INFORMADO","","",-26.228101,-52.674421],
+  ["PRD-218",39,"Condominio Iguatemi","Rua Tamoio, s/n",7,28,"EXTERNO","SEM_ACESSO","",-26.228078,-52.674436],
+  ["PRD-219",62,"Ed. Fornari","Rua Ibiporã, s/n",7,28,"EXTERNO","SEM_ACESSO","",-26.226928,-52.675212],
+  ["PRD-244",38,"Edifício s/ nome","Rua Caramuru, 495",3,12,"EXTERNO","SEM_ACESSO","Sobre a loja Tralalá",-26.226547,-52.673877],
+  ["PRD-232",1,"Edifício s/ nome","Rua Argentina, 2",8,8,"EXTERNO","EXIGE_CODIGO","",-26.228133,-52.678051],
+  ["PRD-249",1,"Edifício Vila Veneza","Rua Argentina, 147",3,8,"EXTERNO","","",-26.228664,-52.678258],
+  ["PRD-250",7,"Edifício Vila Veneza","Rua Argentina, 229",3,12,"EXTERNO","COM_ACESSO","",-26.229381,-52.67855],
+  ["PRD-251",7,"Edifício s/ nome","Rua Chile, 94",3,3,"EXTERNO","EXIGE_CODIGO","",-26.228627,-52.678993],
+  ["PRD-253",43,"Residencial Miraggio","Rua Vicente Machado, 191",3,0,"EXTERNO","EXIGE_CODIGO,COM_CAMERA","",-26.23154,-52.685184],
+  ["PRD-235",62,"Edifício s/ nome","Rua Itabira, 649",4,4,"NAO_INFORMADO","SEM_ACESSO","",-26.226814,-52.677693],
+  ["PRD-239",2,"Edifício José Nacir","Rua Paraná, 1077",4,0,"EXTERNO","SEM_ACESSO","",-26.226456,-52.678084],
+  ["PRD-252",80,"Edifício s/ nome","Travessa José Rodrigues Pinto, 172",3,6,"EXTERNO","EXIGE_CODIGO","",-26.227037,-52.679396],
+  ["PRD-121",54,"Residencial Efeso","Rua Nelson Germardt, 77",5,5,"EXTERNO","","Bloco 3",-26.211072,-52.688137],
+  ["PRD-122",54,"Condominio","Rua Nelson Germardt, 105",6,6,"EXTERNO","","",-26.211066,-52.688143],
+  ["PRD-123",54,"Condominio","Rua Nelson Germardt, 131",6,6,"EXTERNO","","",-26.210993,-52.688148],
+  ["PRD-124",54,"Resid. Sophalara Pelinson","Rua Ademi Conico, 87",0,4,"NAO_INFORMADO","COM_ACESSO","Rua sem saída",-26.211177,-52.690203],
+  ["PRD-125",54,"Res. Jerusalém Bloco III","Rua Clevelândia, 1014",0,0,"EXTERNO","SEM_ACESSO,PEDE_NUM_APTO","",-26.210046,-52.698717],
+  ["PRD-126",54,"Condominio Sobrado","Rua Clevelândia, 1163",0,2,"NAO_INFORMADO","","",-26.210063,-52.699044],
+  ["PRD-127",54,"Condominio S/N","Rua Clevelândia, 1230",0,2,"EXTERNO","","Sobre o mercado Zanela",-26.210059,-52.69896],
+  ["PRD-128",54,"Residencial Betez","Rua Campo Seguro",0,20,"EXTERNO","SEM_ACESSO,CONDOMINIO_CASAS","",-26.209571,-52.698975],
+  ["PRD-129",54,"Residencial Jerusalém I","Rua Campo Seguro, 83",0,0,"EXTERNO","SEM_ACESSO","",-26.209568,-52.698892],
+  ["PRD-130",54,"Residencial Jerusalém II","Rua Campo Seguro, 75",0,0,"EXTERNO","SEM_ACESSO","",-26.209568,-52.698892],
+  ["PRD-131",55,"Condominio","Rua José Fraron, 959",0,10,"EXTERNO","SEM_ACESSO,EXIGE_CODIGO","",-26.207347,-52.690089],
+  ["PRD-132",54,"Residencial","R. Maria Martino Levesso, 186",0,4,"EXTERNO","SEM_ACESSO","",-26.208019,-52.690503],
+  ["PRD-134",52,"Condominio S/N","Rua Vinicius de Moraes, 391",0,4,"SEM_INTERFONE","COM_ACESSO","",-26.211679,-52.685831],
+  ["PRD-135",52,"Condominio S/N","Rua José Tato, 552",0,5,"EXTERNO","SEM_ACESSO,CONDOMINIO_CASAS","",-26.211808,-52.683238],
+  ["PRD-136",52,"Condominio S/N","Rua Joaquim Nabuco, 440",0,6,"SEM_INTERFONE","SEM_ACESSO,CONDOMINIO_CASAS","",-26.211644,-52.684949],
+  ["PRD-137",52,"Condominio S/N","Rua Joaquim Nabuco, 25",0,5,"SEM_INTERFONE","SEM_ACESSO,CONDOMINIO_CASAS","",-26.21156,-52.684945],
+  ["PRD-138",52,"Condominio S/N","Rua Joaquim Nabuco, 35",0,0,"SEM_INTERFONE","SEM_ACESSO,CONDOMINIO_CASAS","",-26.211476,-52.68494],
+  ["PRD-139",52,"Condominio S/N","Rua Joaquim Nabuco, 39",0,0,"SEM_INTERFONE","SEM_ACESSO,CONDOMINIO_CASAS","",-26.211392,-52.684936],
+  ["PRD-140",52,"Condominio S/N","Rua Joaquim Nabuco, 45",0,0,"SEM_INTERFONE","SEM_ACESSO,CONDOMINIO_CASAS","",-26.211886,-52.684961],
+  ["PRD-141",52,"Condominio S/N","Rua Joaquim Nabuco, 109",0,0,"SEM_INTERFONE","COM_ACESSO,CONDOMINIO_CASAS","",-26.211813,-52.684959],
+  ["PRD-142",52,"Condominio Castel Verde","Rua Joaquim Nabuco, 385",0,3,"NAO_INFORMADO","CONDOMINIO_CASAS","Casas 385, 387 e 389",-26.211728,-52.684954],
+  ["PRD-237",53,"Corteo residence","Rua José Fraron, 160",4,0,"EXTERNO","SEM_ACESSO","",-26.206977,-52.682858],
+  ["PRD-241",48,"Edifício s/ nome","Rua Nereu Ramos, 1075",4,0,"EXTERNO","SEM_ACESSO,PEDE_NUM_APTO","",-26.217251,-52.673526],
+  ["PRD-248",49,"Edifício s/ nome","Rua Manuel Ribas, 469",3,0,"EXTERNO","","Sobre a Refrigeração Escopel",-26.216145,-52.663343],
+  ["PRD-146",71,"Edifício Compagnoni","Rua Iguaçu, 1265",2,0,"EXTERNO","SEM_ACESSO,EXIGE_CODIGO","",-26.227424,-52.664714],
+  ["PRD-147",71,"Ed. Residencial Genova","Rua Tupinambá, 177",8,0,"EXTERNO","EXIGE_CODIGO","",-26.226764,-52.665915],
+  ["PRD-148",72,"Prédio Amora Cosméticos","Rua Ibiporã, 1166",3,4,"EXTERNO","SEM_ACESSO","",-26.226225,-52.665852],
+  ["PRD-149",72,"Prédio Ciber tech","Rua Ibiporã, 1180",3,4,"EXTERNO","PEDE_NUM_APTO","",-26.226242,-52.665701],
+  ["PRD-150",3,"Prédio Farmacia Bela Vita","Rua Itabira, 1200",2,4,"SEM_INTERFONE","COM_ACESSO","",-26.224644,-52.673179],
+  ["PRD-221",67,"Residencial Atlantes","Trav. Indus, 51",6,0,"EXTERNO","EXIGE_CODIGO","",-26.228904,-52.66604],
+  ["PRD-247",71,"Edifício s/ nome","Rua Daniel Pagnoncelli, 334",3,6,"EXTERNO","EXIGE_CODIGO","",-26.226996,-52.6627],
+  ["PRD-151",34,"Edifício s/ nome","Rua Iguaçu, 892",2,4,"EXTERNO","SEM_ACESSO","",-26.22696,-52.668874],
+  ["PRD-152",34,"Lebron","Rua Iguaçu, 888",4,0,"EXTERNO","SEM_ACESSO","Edifício misto (comercial e residencial)",-26.226955,-52.668924],
+  ["PRD-153",37,"Edifício Premium","Avenida Tupi, 2695",10,14,"EXTERNO","SEM_ACESSO","",-26.229507,-52.671594],
+  ["PRD-154",36,"Ed. Clotilde Amadora","Rua Tocantins, 260",11,0,"EXTERNO","SEM_ACESSO,EXIGE_CODIGO,COM_CAMERA","",-26.228133,-52.670481],
+  ["PRD-155",36,"Ed. Ottilio Amadori","Rua Tocantins, 2075",19,0,"EXTERNO","SEM_ACESSO,EXIGE_CODIGO","",-26.22802,-52.670465],
+  ["PRD-197",36,"Residencial Parma","Rua Itapuã, 804",7,0,"EXTERNO","EXIGE_CODIGO","",-26.22902,-52.667396],
+  ["PRD-202",36,"Ed. Aimoré","Rua Aimoré, 312",8,0,"EXTERNO","PEDE_NUM_APTO,COM_CAMERA","",-26.22847,-52.66838],
+  ["PRD-220",36,"Prédio da Dimare","Rua Goianazes, 365",7,0,"EXTERNO","SEM_ACESSO,EXIGE_CODIGO","",-26.228587,-52.669468],
+  ["PRD-224",36,"Sunset Yellow","Rua Goianazes, 510",6,23,"NAO_INFORMADO","","",-26.228855,-52.669506],
+  ["PRD-234",36,"Residencial Bergamo","Rua Goianazes, 331",6,0,"EXTERNO","SEM_ACESSO,COM_CAMERA","",-26.228587,-52.669468],
+  ["PRD-245",39,"Ed. Cancún","Rua Araribóia, 628",3,0,"EXTERNO","","",-26.228659,-52.674088],
+  ["PRD-158",39,"Edifício s/ nome","Avenida Tupi, 55",3,4,"EXTERNO","SEM_ACESSO","Prédio da Paraná Plástico",-26.228937,-52.671616],
+  ["PRD-159",39,"Edifício s/ nome","Avenida Tupi, 47",3,0,"NAO_INFORMADO","COM_ACESSO","Sobre a Magazine Avenida",-26.228937,-52.671616],
+  ["PRD-160",39,"Edifício s/ nome","Avenida Tupi, 2574",2,0,"EXTERNO","SEM_ACESSO","",-26.228937,-52.671616],
+  ["PRD-161",39,"Ed. Palacio dos Arcos","Rua Pedro Ramires de Mello, 47",4,12,"NAO_INFORMADO","COM_ACESSO","",-26.227911,-52.672528],
+  ["PRD-162",39,"Ed. Cavazzole","Rua Pedro Ramires de Mello, 21",10,18,"EXTERNO","ACESSO_RESTRITO","",-26.227821,-52.672348],
+  ["PRD-163",3,"Edifício s/ nome","Rua Guarani, 2574",2,0,"NAO_INFORMADO","","Ao lado do Hotel San Pietro",-26.22637,-52.672769],
+  ["PRD-164",39,"Ed. Janaina Cent","Rua Caramuru",3,12,"EXTERNO","SEM_ACESSO","",-26.229887,-52.672711],
+  ["PRD-165",39,"Edifício s/ nome","Rua Caramuru, 107",3,12,"EXTERNO","SEM_ACESSO","",-26.229563,-52.672666],
+  ["PRD-167",39,"Hotel Luz","Rua Araribóia",3,74,"NAO_INFORMADO","","",-26.228753,-52.673181],
+  ["PRD-168",39,"Condominío Ouro Negro","Rua Caramuru, 331",6,6,"EXTERNO","SEM_ACESSO","Esquina c/ Rua Pedro Ramires de Mello",-26.227965,-52.673021],
+  ["PRD-169",63,"Condomínio Leonardo Frederico","Rua Pedro Ramires de Mello",2,10,"EXTERNO","SEM_ACESSO","",-26.228749,-52.674281],
+  ["PRD-170",63,"Residencial Ágape II","Rua Pedro Ramires de Mello",11,44,"EXTERNO","SEM_ACESSO","",-26.228704,-52.674185],
+  ["PRD-171",39,"Ed. Dom Pedro","Rua Caramuru",13,48,"EXTERNO","SEM_ACESSO","",-26.229887,-52.672711],
+  ["PRD-172",39,"Condomínio Eugênio","Avenida Tupi, 2660",6,0,"EXTERNO","","",-26.229357,-52.67165],
+  ["PRD-173",37,"Ed. Vivaldi","Avenida Tupi, 2692",14,0,"EXTERNO","INTERFONE_DIGITAL","",-26.229446,-52.671589],
+  ["PRD-174",37,"Ed. Colibri","Rua Itacolomi, 830",8,0,"EXTERNO","SEM_ACESSO","",-26.230117,-52.671647],
+  ["PRD-175",3,"Edifício s/ nome","Rua Guarani, 141",12,0,"NAO_INFORMADO","SEM_ACESSO","Próximo à Leve Confecções",-26.227245,-52.672251],
+  ["PRD-176",39,"Resid. Verissimo Rizzi","Rua Pedro Ramires de Mello, 20",16,0,"EXTERNO","SEM_ACESSO,INTERFONE_DIGITAL","",-26.227818,-52.672341],
+  ["PRD-177",3,"Edifício s/ nome","Rua Guarani, 27",3,6,"EXTERNO","","Ao lado da Paraná Plástico",-26.228139,-52.67174],
+  ["PRD-178",63,"Ed. Centro Médico","Rua Pedro Ramires de Mello, 396",4,0,"SEM_INTERFONE","COM_ACESSO","",-26.229637,-52.676133],
+  ["PRD-179",63,"Ed. Monte Ararate","Rua Paraná, 804",8,0,"EXTERNO","SEM_ACESSO,EXIGE_CODIGO,COM_CAMERA","",-26.228978,-52.676626],
+  ["PRD-180",63,"Condominio Unicenter","Rua Pedro Ramires de Mello, 326",3,0,"SEM_INTERFONE","SEM_ACESSO","",-26.229187,-52.675208],
+  ["PRD-181",39,"Edificio Tonetti","Rua Tamoio, 633",2,4,"EXTERNO","SEM_ACESSO","",-26.228589,-52.67413],
+  ["PRD-182",39,"Resid. Monte Efraim","Rua Tamoio, 600",9,4,"NAO_INFORMADO","EM_REFORMA","",-26.228845,-52.673971],
+  ["PRD-183",63,"Edifício s/ nome","Rua Pedro Ramires de Mello, 274",0,4,"EXTERNO","COM_ACESSO","Edifício misto (4 aptos residenciais)",-26.22886,-52.674517],
+  ["PRD-184",63,"Edificio Lorenzo","Rua Pedro Ramires de Mello, 258",9,0,"EXTERNO","EXIGE_CODIGO","",-26.22876,-52.674304],
+  ["PRD-185",63,"Edificio Hospital de Olhos","Rua Pedro Ramires de Mello, 256",3,0,"SEM_INTERFONE","COM_ACESSO","Edifício comercial (Hospital de Olhos)",-26.228748,-52.674278],
+  ["PRD-186",39,"Edifício s/ nome","Rua Pedro Ramires de Mello, 76",3,12,"NAO_INFORMADO","SEM_ACESSO","Esquina c/ Papelaria Apolo",-26.227988,-52.672682],
+  ["PRD-187",39,"Edifício s/ nome","Rua Pedro Ramires de Mello, 60",2,3,"SEM_INTERFONE","COM_ACESSO","Sobre a Papelaria Apolo",-26.227922,-52.672551],
+  ["PRD-188",39,"Edifício s/ nome","Rua Araribóia, 774",3,0,"NAO_INFORMADO","SEM_ACESSO,EM_REFORMA","",-26.228659,-52.674088],
+  ["PRD-189",39,"Cora Coralina","Rua Araribóia, 784",6,0,"EXTERNO","SEM_ACESSO","",-26.228659,-52.674088],
+  ["PRD-199",67,"Ed. Adão de Oliveira","Rua Sergipe, 55",5,0,"EXTERNO","SEM_ACESSO,PEDE_NUM_APTO","",-26.230374,-52.664263],
+  ["PRD-200",67,"Ed. Leonidas de Oliveira","Rua Sergipe, 23",4,0,"EXTERNO","SEM_ACESSO","",-26.230374,-52.664263],
+  ["PRD-201",39,"Ed. Maria de Oliveira","Rua Araribóia, 1032",5,0,"EXTERNO","SEM_ACESSO","",-26.228659,-52.674088],
+  ["PRD-198",14,"Condominio Vila Nova","Rua Itapuã, 605",4,0,"EXTERNO","","",-26.222616,-52.666459]
+];

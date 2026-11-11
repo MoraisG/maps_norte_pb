@@ -91,6 +91,8 @@ const ApiClient = {
       }
       const err = new Error(data.erro || "Operação recusada pelo servidor.");
       err.codigo = data.codigo || 400;
+      err.conflitos = data.conflitos || [];
+      err.territorios = data.territorios || null;
       throw err;
     }
 

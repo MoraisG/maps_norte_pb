@@ -8,7 +8,7 @@
   .\scripts\query-sheet.ps1 -Operacao ler-aba -Aba Respostas -Limite 20 -Ultimas
 #>
 param(
-  [ValidateSet("resumo", "ler-aba")]
+  [ValidateSet("resumo", "ler-aba", "inicializar-predios")]
   [string]$Operacao = "resumo",
   [string]$Aba = "Respostas",
   [int]$Limite = 30,
