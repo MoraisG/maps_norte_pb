@@ -47,6 +47,52 @@ const ApiClient = {
     sessionStorage.removeItem("AUTH_EXPIRES_AT");
   },
 
+  // Sessão fixa de 1 h no servidor. A renovação só acontece quando NECESSÁRIA:
+  // o usuário está usando o app (há uma requisição saindo) e faltam menos de 10 min.
+  JANELA_RENOVACAO_MS: 10 * 60 * 1000,
+  _renovacaoEmAndamento: null,
+
+  precisaRenovarSessao() {
+    const expiraEm = Number(sessionStorage.getItem("AUTH_EXPIRES_AT") || 0);
+    if (!expiraEm) return false;
+    const restante = expiraEm - Date.now();
+    return restante > 0 && restante < this.JANELA_RENOVACAO_MS;
+  },
+
+  async renovarSessaoSeNecessario() {
+    if (!this.precisaRenovarSessao()) return;
+    // Single-flight: várias requisições simultâneas compartilham a mesma renovação
+    if (!this._renovacaoEmAndamento) {
+      this._renovacaoEmAndamento = (async () => {
+        try {
+          const res = await this._enviar("auth/refresh", {}, this.obterTokenSessao());
+          if (res && res.sucesso && res.sessionToken) {
+            sessionStorage.setItem("AUTH_SESSION_TOKEN", res.sessionToken);
+            sessionStorage.setItem("AUTH_EXPIRES_AT", String(res.expiraEm || 0));
+          }
+        } catch (e) {
+          // Falha de rede na renovação: segue com o token atual até ele expirar
+        } finally {
+          this._renovacaoEmAndamento = null;
+        }
+      })();
+    }
+    await this._renovacaoEmAndamento;
+  },
+
+  async _enviar(rota, payload, sessionToken) {
+    const response = await fetch(this.getApiUrl(), {
+      method: "POST",
+      headers: { "Content-Type": "text/plain;charset=utf-8" },
+      body: JSON.stringify({ rota: rota, sessionToken: sessionToken, ...payload }),
+      redirect: "follow"
+    });
+    if (!response.ok) {
+      throw new Error(`Falha de comunicação HTTP (${response.status})`);
+    }
+    return response.json();
+  },
+
   /**
    * Executa chamada autenticada para o Google Apps Script
    */
@@ -54,6 +100,10 @@ const ApiClient = {
     const apiUrl = this.getApiUrl();
     if (!apiUrl) {
       throw new Error("Configure a URL do Aplicativo da Web (Google Apps Script) nas configurações de conexão.");
+    }
+
+    if (exigirSessao && !String(rota).startsWith("auth/")) {
+      await this.renovarSessaoSeNecessario();
     }
 
     const sessionToken = this.obterTokenSessao();

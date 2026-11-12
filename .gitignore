@@ -9,3 +9,9 @@
 # Dependências locais
 node_modules/
 .env.example
+
+# Especificações/planos locais (não versionar)
+spec/
+
+client_secret*.json
+*.clasprc*

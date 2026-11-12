@@ -196,7 +196,7 @@ const MapaTerritorios = {
                 <span class="px-2 py-0.5 text-[10px] font-semibold rounded-full ${interfoneBadge.cls}">${interfoneBadge.texto}</span>
                 ${tagsBadges.map(b => `<span class="px-2 py-0.5 text-[10px] font-medium rounded-full ${b.cls}">${b.texto}</span>`).join("")}
               </div>
-              <button onclick="MapaTerritorios.abrirModalTerritorio(${Number(t.numero)}, '${Utils.escapeHtml(p.idPredio)}')" class="mt-2 w-full py-1 px-2.5 bg-slate-100 hover:bg-slate-200 text-slate-800 font-semibold text-[11px] rounded-full transition">
+              <button data-id-predio="${Utils.escapeHtml(p.idPredio)}" onclick="MapaTerritorios.abrirModalTerritorio(${Number(t.numero)}, this.dataset.idPredio)" class="mt-2 w-full py-1 px-2.5 bg-slate-100 hover:bg-slate-200 text-slate-800 font-semibold text-[11px] rounded-full transition">
                 Abrir Guia do Cartão ${Number(t.numero)}
               </button>
             </div>
@@ -391,7 +391,7 @@ const MapaTerritorios = {
       const pinClass = this.obterClassePinoPredio(p);
 
       const btnMarcarHtml = podeMarcarPredio
-        ? `<button type="button" onclick="event.stopPropagation(); App.acaoAlternarPredioTrabalhado('${Utils.escapeHtml(p.idPredio)}', ${Number(t.numero)}, ${!concluido})" class="mt-2.5 w-full py-1.5 px-3 rounded-full text-[11px] font-semibold transition flex items-center justify-center gap-1.5 ${concluido ? "bg-[#e6f4ea] text-[#146c2e] border border-[#a8dab5]" : "bg-slate-100 hover:bg-[#d3e3fd] text-slate-700 hover:text-[#041e49]"}">
+        ? `<button type="button" data-id-predio="${Utils.escapeHtml(p.idPredio)}" onclick="event.stopPropagation(); App.acaoAlternarPredioTrabalhado(this.dataset.idPredio, ${Number(t.numero)}, ${!concluido})" class="mt-2.5 w-full py-1.5 px-3 rounded-full text-[11px] font-semibold transition flex items-center justify-center gap-1.5 ${concluido ? "bg-[#e6f4ea] text-[#146c2e] border border-[#a8dab5]" : "bg-slate-100 hover:bg-[#d3e3fd] text-slate-700 hover:text-[#041e49]"}">
             <span>${concluido ? `✓ Trabalhado (${Utils.formatarDataBr(p.ultimaDataConclusao)}) — Desfazer` : "✓ Marcar Prédio como Trabalhado"}</span>
           </button>`
         : (concluido
@@ -399,7 +399,7 @@ const MapaTerritorios = {
           : "");
 
       return `
-        <div id="card-predio-${Utils.escapeHtml(p.idPredio)}" onclick="MapaTerritorios.focarPredioNoModal('${Utils.escapeHtml(p.idPredio)}')" class="p-3 rounded-2xl border ${concluido ? "bg-[#f4fbf6] border-[#a8dab5]" : "bg-white border-slate-200 hover:border-slate-300"} cursor-pointer transition">
+        <div id="card-predio-${Utils.escapeHtml(p.idPredio)}" data-id-predio="${Utils.escapeHtml(p.idPredio)}" onclick="MapaTerritorios.focarPredioNoModal(this.dataset.idPredio)" class="p-3 rounded-2xl border ${concluido ? "bg-[#f4fbf6] border-[#a8dab5]" : "bg-white border-slate-200 hover:border-slate-300"} cursor-pointer transition">
           <div class="flex items-start justify-between gap-2">
             <div class="flex items-start gap-2.5 min-w-0">
               <span class="predio-pin-marker ${pinClass} shrink-0 mt-0.5">${item.ordemPin}</span>
