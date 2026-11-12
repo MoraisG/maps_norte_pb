@@ -36,6 +36,31 @@ jobs:
           for f in js/*.js sw.js; do node --check "$f"; done
           python3 -c "import json; json.load(open('backend/appsscript.json')); json.load(open('manifest.json'))"
 
+      - name: Política de frontend (CSP sem scripts inline)
+        run: |
+          falhou=0
+          # Handlers de evento inline quebram a CSP (script-src sem 'unsafe-inline')
+          if git grep -nE '\son(click|change|input|submit|load|error|focus|blur|key[a-z]+|mouse[a-z]+)=' -- index.html 'js/*.js'; then
+            echo "::error::Use data-acao + delegação (ACOES_UI em js/app.js) em vez de handlers inline."; falhou=1
+          fi
+          # Scripts <script> inline ou externos fora da lista permitida
+          if grep -nE '<script>|<script [^>]*>[^<]' index.html; then
+            echo "::error::Script inline em index.html."; falhou=1
+          fi
+          if grep -noE '<script[^>]+src="https?://[^"]+"' index.html | grep -v 'https://accounts.google.com/gsi/client'; then
+            echo "::error::Script externo não permitido (hospede em vendor/ ou libere na CSP com justificativa)."; falhou=1
+          fi
+          grep -q "script-src 'self' https://accounts.google.com/gsi/client;" index.html || { echo "::error::CSP script-src foi alterada."; falhou=1; }
+          exit $falhou
+
+      - name: CSS do Tailwind atualizado
+        run: |
+          npx --yes tailwindcss@3.4.17 -c tailwind.config.js -i css/tailwind.input.css -o "$RUNNER_TEMP/tailwind.css" --minify
+          if ! cmp -s "$RUNNER_TEMP/tailwind.css" css/tailwind.css; then
+            echo "::error::css/tailwind.css está desatualizado. Rode: npx tailwindcss@3.4.17 -c tailwind.config.js -i css/tailwind.input.css -o css/tailwind.css --minify"
+            exit 1
+          fi
+
       - name: Testes de segurança (Apps Script simulado)
         run: |
           for t in tests/*.test.js; do

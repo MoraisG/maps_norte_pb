@@ -4,7 +4,9 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
   <meta name="theme-color" content="#ffffff" />
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self' https://accounts.google.com https://*.googleapis.com https://script.google.com https://script.googleusercontent.com https://unpkg.com https://cdn.tailwindcss.com https://*.tile.openstreetmap.org; style-src 'self' 'unsafe-inline' https://unpkg.com https://fonts.googleapis.com https://accounts.google.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: https://*.googleusercontent.com https://*.tile.openstreetmap.org https://unpkg.com; script-src 'self' 'unsafe-inline' https://accounts.google.com https://unpkg.com https://cdn.tailwindcss.com;" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://accounts.google.com/gsi/client; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://accounts.google.com/gsi/style; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: https://*.tile.openstreetmap.org https://*.googleusercontent.com; connect-src 'self' https://script.google.com https://script.googleusercontent.com https://accounts.google.com/gsi/; frame-src https://accounts.google.com/gsi/; worker-src 'self'; manifest-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; upgrade-insecure-requests;" />
+  <meta name="referrer" content="strict-origin-when-cross-origin" />
+  <script src="js/frame-guard.js?v=9"></script>
   <title>Territórios Norte PB — Gestão e Mapas</title>
   <link rel="manifest" href="manifest.json" />
   <link rel="icon" type="image/svg+xml" href="assets/icon.svg" />
@@ -15,14 +17,14 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
 
-  <!-- Tailwind CSS & Leaflet GIS -->
-  <script src="https://cdn.tailwindcss.com"></script>
-  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="" />
-  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
+  <!-- Tailwind CSS (compilado localmente) & Leaflet GIS (hospedado no próprio site) -->
+  <link rel="stylesheet" href="css/tailwind.css?v=9" />
+  <link rel="stylesheet" href="vendor/leaflet-1.9.4/leaflet.css" />
+  <script src="vendor/leaflet-1.9.4/leaflet.js"></script>
 
   <!-- Google Identity Services (OAuth2 / OIDC Real) -->
   <script src="https://accounts.google.com/gsi/client" async defer></script>
-  <link rel="stylesheet" href="css/styles.css?v=8" />
+  <link rel="stylesheet" href="css/styles.css?v=9" />
 </head>
 <body class="bg-[#f8fafc] text-[#1f1f1f] min-h-screen flex flex-col selection:bg-[#d3e3fd] selection:text-[#041e49]">
 
@@ -510,9 +512,9 @@
   </div>
 
   <!-- Scripts Modulares da Aplicação -->
-  <script src="js/utils.js?v=8"></script>
-  <script src="js/api.js?v=8"></script>
-  <script src="js/map.js?v=8"></script>
-  <script src="js/app.js?v=8"></script>
+  <script src="js/utils.js?v=9"></script>
+  <script src="js/api.js?v=9"></script>
+  <script src="js/map.js?v=9"></script>
+  <script src="js/app.js?v=9"></script>
 </body>
 </html>
