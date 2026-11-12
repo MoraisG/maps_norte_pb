@@ -19,16 +19,231 @@ const CONFIG = {
   get ADMIN_ROOT_EMAIL() {
     return PropertiesService.getScriptProperties().getProperty("ADMIN_ROOT_EMAIL") || Session.getEffectiveUser().getEmail();
   },
-  SESSION_TTL_SECONDS: 3600, // 1 hora de sessão ativa no CacheService
-  DIAS_RECENTE: 120,         // Janela de quarentena após devolução
-  GOOGLE_CLIENT_ID: "917012478113-2nq9p3io8j8cao95gscamjh0jqrp6u4p.apps.googleusercontent.com"
+  SESSION_TTL_SECONDS: 3600,        // Sessão FIXA de 1 hora (não desliza com a atividade)
+  SESSION_REFRESH_JANELA_SECONDS: 900, // Renovação só é aceita nos últimos 15 min da sessão
+  SESSION_GRACE_SECONDS: 60,        // Token antigo continua válido 60 s após a renovação (requisições em voo)
+  SESSION_MAX_AGE_SECONDS: 43200,   // Cadeia de renovações limitada a 12 h desde o login com Google
+  DIAS_RECENTE: 120,                // Janela de quarentena após devolução
+  LIMITE_FILA: 5,                   // Regra da Fila Top 5 (validada também no servidor)
+  LOGIN_LIMITE_POR_MINUTO: 60,      // Teto global (tokens inválidos sem e-mail identificável)
+  LOGIN_FALHAS_MAX: 5,              // Falhas por e-mail antes de entrar na Blacklist
+  LOGIN_FALHAS_JANELA_SECONDS: 21600, // Janela de contagem das falhas (6 h, máximo do CacheService)
+  DIAG_FALHAS_MAX_10MIN: 5,         // Chaves de diagnóstico inválidas antes do bloqueio temporário
+  GOOGLE_CLIENT_ID: "917012478113-2nq9p3io8j8cao95gscamjh0jqrp6u4p.apps.googleusercontent.com",
+  GOOGLE_ISSUERS: ["accounts.google.com", "https://accounts.google.com"],
+  // Abas nunca expostas pela rota de diagnóstico (PII de usuários e trilha de auditoria)
+  ABAS_BLOQUEADAS_DIAGNOSTICO: ["Usuarios", "Auditoria", "Blacklist"]
 };
 
 /**
- * Roteador HTTP GET (Consultas Autenticadas)
+ * Lê uma ScriptProperty opcional (configurações operacionais sem alterar código).
+ */
+function lerPropriedade(chave, padrao) {
+  try {
+    const v = PropertiesService.getScriptProperties().getProperty(chave);
+    return v === null || v === undefined || v === "" ? padrao : v;
+  } catch (e) {
+    return padrao;
+  }
+}
+
+/**
+ * ============================================================================
+ * SANITIZAÇÃO DE ESCRITA NA PLANILHA (Prevenção de Formula/CSV Injection)
+ * ============================================================================
+ * Qualquer texto iniciado por = + - @ TAB ou CR seria interpretado como fórmula
+ * pelo Google Sheets. O prefixo ' força o armazenamento como texto puro (o
+ * apóstrofo não aparece na célula nem retorna em getValues()).
+ */
+function sanitizarCelula(valor, tamanhoMax) {
+  if (valor === null || valor === undefined) return "";
+  if (typeof valor !== "string") return valor; // Date, number e boolean são seguros
+  let s = valor.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g, "");
+  const max = tamanhoMax || 1000;
+  if (s.length > max) s = s.slice(0, max);
+  if (/^[=+\-@\t\r\n]/.test(s)) s = "'" + s;
+  return s;
+}
+
+function sanitizarLinha(valores, tamanhoMax) {
+  return valores.map(v => sanitizarCelula(v, tamanhoMax));
+}
+
+/**
+ * Rate limit simples por janela fixa usando CacheService.
+ * Retorna true se a operação ainda está dentro do limite.
+ */
+function consumirCota(chave, limite, janelaSegundos) {
+  try {
+    const cache = CacheService.getScriptCache();
+    const janela = Math.floor(Date.now() / (janelaSegundos * 1000));
+    const k = "RL_" + chave + "_" + janela;
+    const atual = Number(cache.get(k) || 0);
+    if (atual >= limite) return false;
+    cache.put(k, String(atual + 1), janelaSegundos + 5);
+    return true;
+  } catch (e) {
+    return true; // Falha do cache não deve derrubar o login
+  }
+}
+
+/**
+ * Grava auditoria no máximo 1 vez por janela para a mesma chave
+ * (evita que tentativas anônimas em massa inchem a aba Auditoria).
+ */
+function registrarAuditoriaLimitada(chaveDedupe, janelaSegundos, acao, nome, email, territorio, resultado, detalhes) {
+  try {
+    const cache = CacheService.getScriptCache();
+    const k = "AUDDEDUP_" + Utilities.base64EncodeWebSafe(String(chaveDedupe)).slice(0, 200);
+    if (cache.get(k)) return;
+    cache.put(k, "1", janelaSegundos);
+  } catch (e) {}
+  registrarAuditoria(acao, nome, email, territorio, resultado, detalhes);
+}
+
+/**
+ * ============================================================================
+ * BLACKLIST DE LOGIN (aba 'Blacklist')
+ * ============================================================================
+ * Após CONFIG.LOGIN_FALHAS_MAX tentativas inválidas do mesmo e-mail, ele é
+ * bloqueado de forma persistente. Para liberar: o ADMIN cadastra/salva o usuário
+ * pelo painel (libera automaticamente) ou muda o Status da linha para LIBERADO.
+ */
+const CABECALHO_BLACKLIST = ["Email", "Motivo", "Tentativas", "BloqueadoEm", "UltimaTentativa", "Status", "LiberadoPor"];
+
+function obterAbaBlacklist() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  let sheet = ss.getSheetByName("Blacklist");
+  if (!sheet) {
+    sheet = ss.insertSheet("Blacklist");
+    sheet.appendRow(CABECALHO_BLACKLIST);
+  }
+  return sheet;
+}
+
+function carregarEmailsBloqueados() {
+  const cache = CacheService.getScriptCache();
+  const raw = cache.get("BLACKLIST_V1");
+  if (raw) {
+    try { return new Set(JSON.parse(raw)); } catch (e) {}
+  }
+  const sheet = obterAbaBlacklist();
+  const dados = sheet.getDataRange().getValues();
+  const lista = [];
+  for (let i = 1; i < dados.length; i++) {
+    const email = String(dados[i][0] || "").toLowerCase().trim();
+    const status = String(dados[i][5] || "BLOQUEADO").toUpperCase().trim();
+    if (email && status === "BLOQUEADO") lista.push(email);
+  }
+  try { cache.put("BLACKLIST_V1", JSON.stringify(lista), 300); } catch (e) {}
+  return new Set(lista);
+}
+
+function emailEstaBloqueado(email) {
+  if (!email) return false;
+  return carregarEmailsBloqueados().has(String(email).toLowerCase().trim());
+}
+
+/**
+ * Conta uma falha de login para o e-mail. Na 5ª falha o e-mail entra na Blacklist.
+ * Retorna true se o e-mail acabou de ser bloqueado.
+ */
+function registrarFalhaLogin(email, motivo) {
+  const emailLimpo = String(email || "").toLowerCase().trim();
+  if (!emailLimpo) return false;
+
+  const cache = CacheService.getScriptCache();
+  const k = "LOGINFAIL_" + Utilities.base64EncodeWebSafe(emailLimpo);
+  const tentativas = Number(cache.get(k) || 0) + 1;
+  cache.put(k, String(tentativas), CONFIG.LOGIN_FALHAS_JANELA_SECONDS);
+
+  if (tentativas < CONFIG.LOGIN_FALHAS_MAX) {
+    registrarAuditoria("LOGIN", "-", emailLimpo, "-", "NEGADO", `${motivo} (tentativa ${tentativas}/${CONFIG.LOGIN_FALHAS_MAX})`);
+    return false;
+  }
+
+  const lock = LockService.getScriptLock();
+  try {
+    lock.waitLock(10000);
+    if (!emailEstaBloqueado(emailLimpo)) {
+      const agora = new Date();
+      obterAbaBlacklist().appendRow(sanitizarLinha([emailLimpo, motivo, tentativas, agora, agora, "BLOQUEADO", ""], 254));
+      cache.remove("BLACKLIST_V1");
+      registrarAuditoria("BLACKLIST_ADICIONADO", "-", emailLimpo, "-", "BLOQUEADO", `${tentativas} tentativas inválidas. Último motivo: ${motivo}`);
+    }
+  } catch (e) {
+    Logger.log("Falha ao gravar blacklist: " + e.message);
+  } finally {
+    try { lock.releaseLock(); } catch (e) {}
+  }
+  return true;
+}
+
+function limparFalhasLogin(email) {
+  try {
+    CacheService.getScriptCache().remove("LOGINFAIL_" + Utilities.base64EncodeWebSafe(String(email || "").toLowerCase().trim()));
+  } catch (e) {}
+}
+
+/**
+ * Libera um e-mail da Blacklist (chamado quando o ADMIN cadastra/salva o usuário).
+ * Retorna true se havia bloqueio ativo.
+ */
+function liberarEmailBlacklist(email, liberadoPor) {
+  const emailLimpo = String(email || "").toLowerCase().trim();
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("Blacklist");
+  if (!sheet || !emailLimpo) return false;
+  const dados = sheet.getDataRange().getValues();
+  let liberou = false;
+  for (let i = 1; i < dados.length; i++) {
+    const e = String(dados[i][0] || "").toLowerCase().trim();
+    const status = String(dados[i][5] || "").toUpperCase().trim();
+    if (e === emailLimpo && status === "BLOQUEADO") {
+      sheet.getRange(i + 1, 6, 1, 2).setValues([["LIBERADO", sanitizarCelula(liberadoPor || "", 254)]]);
+      liberou = true;
+    }
+  }
+  if (liberou) {
+    CacheService.getScriptCache().remove("BLACKLIST_V1");
+    limparFalhasLogin(emailLimpo);
+  }
+  return liberou;
+}
+
+/**
+ * Comparação de strings em tempo constante (evita timing attack na chave de diagnóstico).
+ */
+function compararSeguro(a, b) {
+  const sa = String(a || "");
+  const sb = String(b || "");
+  let diff = sa.length ^ sb.length;
+  const n = Math.max(sa.length, sb.length);
+  for (let i = 0; i < n; i++) {
+    diff |= (sa.charCodeAt(i) || 0) ^ (sb.charCodeAt(i) || 0);
+  }
+  return diff === 0;
+}
+
+/**
+ * Remove campos internos antes de devolver o usuário ao cliente.
+ */
+function usuarioPublico(usuario) {
+  if (!usuario) return null;
+  return {
+    id: usuario.id,
+    nome: usuario.nome,
+    email: usuario.email,
+    perfil: usuario.perfil,
+    status: usuario.status
+  };
+}
+
+/**
+ * Roteador HTTP GET: desativado. Toda a API usa POST (o token de sessão nunca
+ * deve trafegar em query string, onde fica registrado em logs e histórico).
  */
 function doGet(e) {
-  return rotearRequisicao("GET", e.parameter || {}, null);
+  return erroMetodoNaoPermitido();
 }
 
 /**
@@ -98,13 +313,21 @@ function rotearRequisicao(metodo, queryParams, body) {
     switch (rota) {
       // --- DOMÍNIO: AUTH ---
       case "auth/me":
-        return respostaJson({ sucesso: true, usuario: usuario });
+        return respostaJson({ sucesso: true, usuario: usuarioPublico(usuario), expiraEm: sessao.expiraEm });
+
+      case "auth/refresh":
+        if (metodo !== "POST") return erroMetodoNaoPermitido();
+        if (sessao.substituida) {
+          // Token já trocado por outro: impede bifurcação de sessões a partir do mesmo token
+          return respostaJson({ sucesso: false, codigo: 401, erro: "Sessão já renovada em outra requisição. Faça login novamente." });
+        }
+        return renovarSessao(tokenSessao, sessao, usuario);
 
       // --- DOMÍNIO: TERRITÓRIOS (PUBLICADOR + ADMIN) ---
       case "territorios/listar":
         return respostaJson({
           sucesso: true,
-          usuario: usuario,
+          usuario: usuarioPublico(usuario),
           territorios: listarTodosTerritoriosConsolidados(usuario)
         });
 
@@ -194,6 +417,17 @@ function autenticarGoogleIdentity(idToken) {
     return respostaJson({ sucesso: false, codigo: 401, erro: "Token de identidade do Google ausente." });
   }
 
+  // Validação estrutural barata ANTES de gastar quota de UrlFetch (JWT = 3 segmentos base64url)
+  const tokenStr = String(idToken);
+  if (tokenStr.length > 4096 || !/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(tokenStr)) {
+    return respostaJson({ sucesso: false, codigo: 401, erro: "Credencial do Google inválida ou expirada." });
+  }
+
+  // Rate limit global: protege quotas de UrlFetch/execução e a aba Auditoria
+  if (!consumirCota("LOGIN_GLOBAL", CONFIG.LOGIN_LIMITE_POR_MINUTO, 60)) {
+    return respostaJson({ sucesso: false, codigo: 429, erro: "Muitas tentativas de login no momento. Aguarde um minuto e tente novamente." });
+  }
+
   // Valida criptograficamente o JWT direto no servidor OAuth2 do Google
   const urlVerificacao = "https://oauth2.googleapis.com/tokeninfo?id_token=" + encodeURIComponent(idToken);
   let resp;
@@ -204,22 +438,50 @@ function autenticarGoogleIdentity(idToken) {
   }
 
   if (resp.getResponseCode() !== 200) {
-    registrarAuditoria("LOGIN_TOKEN_INVALIDO", "Desconhecido", "-", "-", "ERRO", "ID Token rejeitado pelo Google");
+    registrarAuditoriaLimitada("LOGIN_TOKEN_INVALIDO", 300, "LOGIN_TOKEN_INVALIDO", "Desconhecido", "-", "-", "ERRO", "ID Token rejeitado pelo Google (registro agregado a cada 5 min)");
     return respostaJson({ sucesso: false, codigo: 401, erro: "Credencial do Google inválida ou expirada." });
   }
 
-  const tokenInfo = JSON.parse(resp.getContentText());
+  let tokenInfo;
+  try {
+    tokenInfo = JSON.parse(resp.getContentText());
+  } catch (e) {
+    return respostaJson({ sucesso: false, codigo: 401, erro: "Credencial do Google inválida ou expirada." });
+  }
+
+  // Nome e e-mail vêm do perfil Google do próprio solicitante (dado não confiável): sempre sanitizados
+  const emailAutenticado = String(tokenInfo.email || "").toLowerCase().trim().slice(0, 254);
+  const nomeGoogle = sanitizarCelula(String(tokenInfo.name || emailAutenticado.split("@")[0]).trim(), 120);
+
+  // E-mail na Blacklist: recusa imediata, sem consultar whitelist nem gravar auditoria repetida
+  if (emailEstaBloqueado(emailAutenticado)) {
+    registrarAuditoriaLimitada("BL_" + emailAutenticado, 3600, "LOGIN_BLACKLIST", "-", emailAutenticado, "-", "BLOQUEADO", "Tentativa de e-mail bloqueado (registro agregado a cada 1 h)");
+    return respostaBloqueioBlacklist();
+  }
+
+  // Cada recusa abaixo conta como tentativa inválida para o e-mail (5 → Blacklist)
+  const recusar = (codigo, motivo, mensagem) => {
+    const bloqueou = registrarFalhaLogin(emailAutenticado, motivo);
+    return bloqueou ? respostaBloqueioBlacklist() : respostaJson({ sucesso: false, codigo: codigo, erro: mensagem });
+  };
+
   if (tokenInfo.email_verified !== "true" && tokenInfo.email_verified !== true) {
-    return respostaJson({ sucesso: false, codigo: 401, erro: "O endereço de e-mail da conta Google não está verificado." });
+    return recusar(401, "E-mail Google não verificado", "O endereço de e-mail da conta Google não está verificado.");
   }
 
   if (CONFIG.GOOGLE_CLIENT_ID && tokenInfo.aud !== CONFIG.GOOGLE_CLIENT_ID) {
-    registrarAuditoria("LOGIN_AUD_MISMATCH", tokenInfo.name || "", tokenInfo.email || "", "-", "NEGADO", "Client ID divergente");
-    return respostaJson({ sucesso: false, codigo: 401, erro: "Token emitido para outra aplicação cliente." });
+    return recusar(401, "Client ID divergente (token de outra aplicação)", "Token emitido para outra aplicação cliente.");
   }
 
-  const emailAutenticado = String(tokenInfo.email || "").toLowerCase().trim();
-  const nomeGoogle = String(tokenInfo.name || emailAutenticado.split("@")[0]).trim();
+  if (CONFIG.GOOGLE_ISSUERS.indexOf(String(tokenInfo.iss || "")) === -1) {
+    return recusar(401, "Emissor do token não é o Google", "Credencial do Google inválida ou expirada.");
+  }
+
+  const expSeg = Number(tokenInfo.exp || 0);
+  if (!expSeg || expSeg * 1000 < Date.now()) {
+    // Token expirado é situação normal (aba aberta há muito tempo): não conta como tentativa inválida
+    return respostaJson({ sucesso: false, codigo: 401, erro: "Credencial do Google inválida ou expirada." });
+  }
 
   // Garante que as abas de segurança ('Usuarios' e 'Auditoria') existam
   inicializarAbasSegurancaSeNecessario();
@@ -227,58 +489,100 @@ function autenticarGoogleIdentity(idToken) {
   // Consulta a Whitelist (Aba 'Usuarios')
   const usuario = buscarUsuarioAutorizado(emailAutenticado, true);
   if (!usuario) {
-    registrarAuditoria("LOGIN", nomeGoogle, emailAutenticado, "-", "NEGADO", "E-mail não consta na Whitelist (Usuarios)");
-    return respostaJson({
-      sucesso: false,
-      codigo: 403,
-      erro: "Acesso restrito. Seu usuário não possui autorização para utilizar este sistema."
-    });
+    return recusar(403, "E-mail não consta na Whitelist (Usuarios)", "Acesso restrito. Seu usuário não possui autorização para utilizar este sistema.");
   }
 
   if (usuario.status !== "ATIVO") {
-    registrarAuditoria("LOGIN", usuario.nome, emailAutenticado, "-", "NEGADO", "Usuário com Status INATIVO");
-    return respostaJson({
-      sucesso: false,
-      codigo: 403,
-      erro: "Acesso restrito. Seu cadastro encontra-se inativo."
-    });
+    return recusar(403, "Usuário com Status INATIVO", "Acesso restrito. Seu cadastro encontra-se inativo.");
   }
 
-  // Gera Token de Sessão opaco e armazena no CacheService com TTL de 1 hora
-  const sessionToken = Utilities.getUuid() + "-" + Utilities.getUuid();
-  const expiraEm = Date.now() + (CONFIG.SESSION_TTL_SECONDS * 1000);
-  const dadosSessao = {
-    email: usuario.email,
-    nome: usuario.nome,
-    perfil: usuario.perfil,
-    expiraEm: expiraEm
-  };
-
-  CacheService.getScriptCache().put("SESS_" + sessionToken, JSON.stringify(dadosSessao), CONFIG.SESSION_TTL_SECONDS);
+  limparFalhasLogin(emailAutenticado);
+  const novaSessao = criarSessao(usuario, Date.now());
   registrarAuditoria("LOGIN", usuario.nome, usuario.email, "-", "SUCESSO", `Perfil: ${usuario.perfil}`);
 
   return respostaJson({
     sucesso: true,
-    sessionToken: sessionToken,
-    expiraEm: expiraEm,
-    usuario: usuario
+    sessionToken: novaSessao.sessionToken,
+    expiraEm: novaSessao.expiraEm,
+    usuario: usuarioPublico(usuario)
   });
 }
 
+function respostaBloqueioBlacklist() {
+  return respostaJson({
+    sucesso: false,
+    codigo: 403,
+    erro: "Acesso bloqueado após tentativas inválidas repetidas. Procure o administrador do sistema para liberar seu e-mail."
+  });
+}
+
+/**
+ * Cria uma sessão opaca de duração FIXA (CONFIG.SESSION_TTL_SECONDS).
+ * origemEm = momento do login com Google (preservado nas renovações para limitar a cadeia).
+ */
+function criarSessao(usuario, origemEm) {
+  const sessionToken = Utilities.getUuid() + "-" + Utilities.getUuid();
+  const agora = Date.now();
+  const expiraEm = agora + (CONFIG.SESSION_TTL_SECONDS * 1000);
+  const dadosSessao = {
+    email: usuario.email,
+    nome: usuario.nome,
+    perfil: usuario.perfil,
+    origemEm: origemEm || agora,
+    criadoEm: agora,
+    expiraEm: expiraEm
+  };
+  CacheService.getScriptCache().put("SESS_" + sessionToken, JSON.stringify(dadosSessao), CONFIG.SESSION_TTL_SECONDS);
+  return { sessionToken: sessionToken, expiraEm: expiraEm };
+}
+
 function validarSessao(sessionToken) {
-  if (!sessionToken) return null;
+  if (!sessionToken || sessionToken.length > 200) return null;
   const cache = CacheService.getScriptCache();
   const raw = cache.get("SESS_" + sessionToken);
   if (!raw) return null;
 
   try {
     const sessao = JSON.parse(raw);
-    // Renova o TTL deslizante a cada atividade válida
-    cache.put("SESS_" + sessionToken, raw, CONFIG.SESSION_TTL_SECONDS);
+    // Sessão fixa: SEM renovação automática a cada requisição (a renovação é explícita via auth/refresh)
+    if (!sessao.expiraEm || Date.now() > sessao.expiraEm) {
+      cache.remove("SESS_" + sessionToken);
+      return null;
+    }
     return sessao;
   } catch (e) {
     return null;
   }
+}
+
+/**
+ * auth/refresh — Renova a sessão SOMENTE quando necessário:
+ * - aceita apenas nos últimos CONFIG.SESSION_REFRESH_JANELA_SECONDS da sessão (antes disso devolve a atual);
+ * - o usuário já foi revalidado na whitelist (ATIVO) pelo middleware antes de chegar aqui;
+ * - emite um token NOVO e encurta o antigo para um período de tolerância (requisições em andamento);
+ * - a cadeia de renovações não ultrapassa CONFIG.SESSION_MAX_AGE_SECONDS desde o login com Google.
+ */
+function renovarSessao(tokenAtual, sessao, usuario) {
+  const restanteMs = sessao.expiraEm - Date.now();
+  if (restanteMs > CONFIG.SESSION_REFRESH_JANELA_SECONDS * 1000) {
+    return respostaJson({ sucesso: true, renovada: false, sessionToken: tokenAtual, expiraEm: sessao.expiraEm });
+  }
+
+  const origemEm = sessao.origemEm || sessao.criadoEm || Date.now();
+  if (Date.now() - origemEm > CONFIG.SESSION_MAX_AGE_SECONDS * 1000) {
+    return respostaJson({ sucesso: false, codigo: 401, erro: "Sua sessão atingiu o tempo máximo. Faça login novamente com sua conta Google." });
+  }
+
+  const nova = criarSessao(usuario, origemEm);
+
+  // Token antigo: mantém só pelo período de tolerância, já marcado como substituído
+  const cache = CacheService.getScriptCache();
+  const graca = Math.min(CONFIG.SESSION_GRACE_SECONDS, Math.max(1, Math.floor(restanteMs / 1000)));
+  sessao.expiraEm = Math.min(sessao.expiraEm, Date.now() + graca * 1000);
+  sessao.substituida = true;
+  cache.put("SESS_" + tokenAtual, JSON.stringify(sessao), graca);
+
+  return respostaJson({ sucesso: true, renovada: true, sessionToken: nova.sessionToken, expiraEm: nova.expiraEm });
 }
 
 function revogarSessao(sessionToken, email) {
@@ -363,7 +667,7 @@ function atualizarUltimaAtividadeUsuario(email, descricaoAtividade) {
     const u = buscarUsuarioAutorizado(email, false);
     if (u && u.linhaPlanilha) {
       const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("Usuarios");
-      sheet.getRange(u.linhaPlanilha, 9).setValue(`${descricaoAtividade} (${Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "dd/MM/yyyy HH:mm")})`);
+      sheet.getRange(u.linhaPlanilha, 9).setValue("'" + `${descricaoAtividade} (${Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "dd/MM/yyyy HH:mm")})`);
     }
   } catch (e) {}
 }
@@ -463,6 +767,10 @@ function listarTodosTerritoriosConsolidados(usuarioSolicitante) {
   const hojeMeiaNoiteMs = new Date(agora.getFullYear(), agora.getMonth(), agora.getDate()).getTime();
   const fusoScript = Session.getScriptTimeZone();
   const resultado = [];
+  const emailSolicitante = usuarioSolicitante ? String(usuarioSolicitante.email || "").toLowerCase() : "";
+  const podeVerNomesHistorico =
+    (usuarioSolicitante && usuarioSolicitante.perfil === "ADMIN") ||
+    lerPropriedade("EXPOR_NOMES_HISTORICO", "false") === "true";
 
   for (const num of listaNumeros) {
     const infoBase = mapaBase[num] || { numero: num, bairro: (mapaPdf[num] && mapaPdf[num].bairroDash) || "Território " + num, tipo: "Cidade", wkt: "" };
@@ -522,6 +830,7 @@ function listarTodosTerritoriosConsolidados(usuarioSolicitante) {
         }
         cicloAberto = {
           dirigente: mov.nome,
+          _email: mov.email || emailPorNomeFallback[mov.nome.toLowerCase()] || "",
           dataDesignacao: dataIso,
           dataConclusao: ""
         };
@@ -534,6 +843,7 @@ function listarTodosTerritoriosConsolidados(usuarioSolicitante) {
         } else {
           ciclos.push({
             dirigente: mov.nome,
+            _email: mov.email || emailPorNomeFallback[mov.nome.toLowerCase()] || "",
             dataDesignacao: "",
             dataConclusao: dataIso
           });
@@ -543,6 +853,14 @@ function listarTodosTerritoriosConsolidados(usuarioSolicitante) {
     if (cicloAberto) {
       ciclos.push(cicloAberto);
     }
+
+    // LGPD (minimização): o nome de quem trabalhou cada ciclo só é enviado a ADMIN
+    // ou ao próprio dirigente. Reverter com a ScriptProperty EXPOR_NOMES_HISTORICO = true.
+    const ciclosPublicos = ciclos.map(c => ({
+      dirigente: (podeVerNomesHistorico || (emailSolicitante && c._email === emailSolicitante)) ? c.dirigente : "",
+      dataDesignacao: c.dataDesignacao,
+      dataConclusao: c.dataConclusao
+    }));
 
     resultado.push({
       numero: Number(num),
@@ -557,7 +875,7 @@ function listarTodosTerritoriosConsolidados(usuarioSolicitante) {
       emMinhaPosse: emPosseDoUsuarioAtual,
       nomePdf: (mapaPdf[num] && mapaPdf[num].nomePdf) || `Mapa_PatoBranco_${infoBase.bairro}_${num}.pdf`,
       wkt: infoBase.wkt,
-      ciclos: ciclos,
+      ciclos: ciclosPublicos,
       predios: [],
       totalPredios: 0
     });
@@ -671,13 +989,43 @@ function solicitarTerritorioTransacional(usuario, payload) {
     });
   }
 
+  // Regra da Fila Top 5 validada NO SERVIDOR (antes existia só no frontend e podia ser contornada via fetch)
+  if (usuario.perfil !== "ADMIN") {
+    const elegiveis = calcularNumerosElegiveisFila(todos);
+    const foraDaFila = selecionados.filter(t => !elegiveis.has(String(t.numero)));
+    if (foraDaFila.length > 0) {
+      const desc = foraDaFila.map(t => `T-${t.numero}`).join(", ");
+      registrarAuditoria("SOLICITAR_TERRITORIO", usuario.nome, usuario.email, numeros.join(","), "NEGADO_FORA_DA_FILA", desc);
+      return respostaJson({
+        sucesso: false,
+        codigo: 409,
+        erro: `${desc} não está entre os ${CONFIG.LIMITE_FILA} mais antigos da fila. A fila foi atualizada automaticamente.`,
+        territorios: todos
+      });
+    }
+
+    // Limite opcional de territórios simultâneos por dirigente (ScriptProperty LIMITE_POSSE_POR_PUBLICADOR; 0 = sem limite)
+    const limitePosse = Number(lerPropriedade("LIMITE_POSSE_POR_PUBLICADOR", "0")) || 0;
+    if (limitePosse > 0) {
+      const emPosse = todos.filter(t => t.emMinhaPosse && t.statusReal === "OCUPADO").length;
+      if (emPosse + selecionados.length > limitePosse) {
+        registrarAuditoria("SOLICITAR_TERRITORIO", usuario.nome, usuario.email, numeros.join(","), "NEGADO_LIMITE_POSSE", `Em posse: ${emPosse}, limite: ${limitePosse}`);
+        return respostaJson({
+          sucesso: false,
+          codigo: 409,
+          erro: `Você já está com ${emPosse} território(s). O limite é de ${limitePosse} território(s) simultâneos por dirigente.`
+        });
+      }
+    }
+  }
+
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const sheetResp = ss.getSheetByName("Respostas");
   const agora = new Date();
   const dataSomente = new Date(agora.getFullYear(), agora.getMonth(), agora.getDate());
 
   for (const territorio of selecionados) {
-    sheetResp.appendRow([
+    sheetResp.appendRow(sanitizarLinha([
       agora,
       usuario.nome,
       Number(territorio.numero),
@@ -687,7 +1035,7 @@ function solicitarTerritorioTransacional(usuario, payload) {
       territorio.tipo || "Cidade",
       "",
       ""
-    ]);
+    ], 200));
   }
 
   SpreadsheetApp.flush();
@@ -702,6 +1050,34 @@ function solicitarTerritorioTransacional(usuario, payload) {
       ? `Território ${selecionados[0].numero} (${selecionados[0].bairro}) reservado com sucesso para ${usuario.nome}!`
       : `${selecionados.length} territórios (${resumoNums}) reservados com sucesso para ${usuario.nome}!`
   });
+}
+
+/**
+ * Espelha a regra da Fila Top 5 do frontend (App.obterFilaCincoDisponiveis):
+ * um território é elegível se estiver entre os 5 mais antigos DISPONÍVEIS em
+ * qualquer um dos filtros oferecidos na tela (Geral, Com Prédios, Urbano, Rural).
+ * A lista recebida já vem ordenada por antiguidade por listarTodosTerritoriosConsolidados.
+ */
+function calcularNumerosElegiveisFila(todosOrdenados) {
+  const limite = CONFIG.LIMITE_FILA;
+  const disponiveis = todosOrdenados.filter(t => t.statusReal === "DISPONÍVEL");
+
+  // O frontend usa prédios-semente como fallback quando a aba Predios não tem itens do território
+  const numerosComSemente = new Set(PREDIOS_SEMENTE_NORTE.map(r => String(r[1])));
+  const temPredios = t => (Array.isArray(t.predios) && t.predios.length > 0) || numerosComSemente.has(String(t.numero));
+
+  const grupos = [
+    disponiveis,
+    disponiveis.filter(temPredios),
+    disponiveis.filter(t => t.tipo === "Cidade"),
+    disponiveis.filter(t => t.tipo === "Rural")
+  ];
+
+  const elegiveis = new Set();
+  for (const g of grupos) {
+    g.slice(0, limite).forEach(t => elegiveis.add(String(t.numero)));
+  }
+  return elegiveis;
 }
 
 function devolverTerritorioTransacional(usuario, payload) {
@@ -790,7 +1166,7 @@ function devolverTerritorioTransacional(usuario, payload) {
   }
 
   const tagFechada = foiCompleto ? "COMPLETO" : motivoRaw;
-  sheetResp.appendRow([
+  sheetResp.appendRow(sanitizarLinha([
     agora,
     usuario.nome,
     Number(num),
@@ -800,7 +1176,7 @@ function devolverTerritorioTransacional(usuario, payload) {
     territorio.tipo || "Cidade",
     "",
     tagFechada
-  ]);
+  ], 200));
 
   resetarPrediosDoTerritorio(ss, num);
   SpreadsheetApp.flush();
@@ -947,7 +1323,14 @@ function salvarOuAlterarUsuarioAdmin(adminExecutor, dadosUsuario) {
   }
 
   const emailAlvo = String(dadosUsuario.email).toLowerCase().trim();
-  const nomeAlvo = String(dadosUsuario.nome).trim();
+  const nomeAlvo = String(dadosUsuario.nome).trim().replace(/\s+/g, " ");
+
+  if (emailAlvo.length > 254 || !/^[a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,}$/.test(emailAlvo)) {
+    return respostaJson({ sucesso: false, codigo: 400, erro: "Informe um e-mail válido." });
+  }
+  if (nomeAlvo.length < 3 || nomeAlvo.length > 80 || /[<>]/.test(nomeAlvo) || /^[=+\-@]/.test(nomeAlvo)) {
+    return respostaJson({ sucesso: false, codigo: 400, erro: "O nome deve ter entre 3 e 80 caracteres, sem os símbolos < > e sem iniciar com = + - @." });
+  }
   const perfilAlvo = String(dadosUsuario.perfil || "PUBLICADOR").toUpperCase().trim() === "ADMIN" ? "ADMIN" : "PUBLICADOR";
   const statusAlvo = String(dadosUsuario.status || "ATIVO").toUpperCase().trim() === "INATIVO" ? "INATIVO" : "ATIVO";
 
@@ -963,18 +1346,27 @@ function salvarOuAlterarUsuarioAdmin(adminExecutor, dadosUsuario) {
   for (let i = 1; i < dados.length; i++) {
     const emailLinha = String(dados[i][2] || "").toLowerCase().trim();
     if (emailLinha === emailAlvo) {
-      sheet.getRange(i + 1, 2).setValue(nomeAlvo);
+      sheet.getRange(i + 1, 2).setValue(sanitizarCelula(nomeAlvo, 80));
       sheet.getRange(i + 1, 4).setValue(perfilAlvo);
       sheet.getRange(i + 1, 5).setValue(statusAlvo);
       SpreadsheetApp.flush();
 
+      if (statusAlvo === "ATIVO" && liberarEmailBlacklist(emailAlvo, adminExecutor.email)) {
+        registrarAuditoria("BLACKLIST_LIBERADO", adminExecutor.nome, adminExecutor.email, "-", "SUCESSO", `Alvo: ${emailAlvo}`);
+      }
       registrarAuditoria("ALTERAR_USUARIO", adminExecutor.nome, adminExecutor.email, "-", "SUCESSO", `Alvo: ${emailAlvo} | Perfil=${perfilAlvo} | Status=${statusAlvo}`);
       return respostaJson({ sucesso: true, mensagem: `Usuário ${nomeAlvo} (${emailAlvo}) atualizado com sucesso.` });
     }
   }
 
-  const novoId = "USR-" + String(dados.length).padStart(3, "0");
-  sheet.appendRow([
+  // Id = maior número existente + 1 (evita repetição quando linhas são apagadas manualmente)
+  let maiorId = 0;
+  for (let i = 1; i < dados.length; i++) {
+    const m = String(dados[i][0] || "").match(/^USR-(\d+)$/);
+    if (m) maiorId = Math.max(maiorId, Number(m[1]));
+  }
+  const novoId = "USR-" + String(maiorId + 1).padStart(3, "0");
+  sheet.appendRow(sanitizarLinha([
     novoId,
     nomeAlvo,
     emailAlvo,
@@ -984,8 +1376,13 @@ function salvarOuAlterarUsuarioAdmin(adminExecutor, dadosUsuario) {
     adminExecutor.email,
     "",
     ""
-  ]);
+  ], 254));
   SpreadsheetApp.flush();
+
+  // Pessoa que tentou entrar antes de ser cadastrada pode ter caído na Blacklist: o cadastro libera
+  if (statusAlvo === "ATIVO" && liberarEmailBlacklist(emailAlvo, adminExecutor.email)) {
+    registrarAuditoria("BLACKLIST_LIBERADO", adminExecutor.nome, adminExecutor.email, "-", "SUCESSO", `Alvo: ${emailAlvo}`);
+  }
 
   registrarAuditoria("CRIAR_USUARIO", adminExecutor.nome, adminExecutor.email, "-", "SUCESSO", `Novo: ${emailAlvo} (${perfilAlvo})`);
   return respostaJson({ sucesso: true, mensagem: `Usuário ${nomeAlvo} cadastrado na Whitelist com sucesso!` });
@@ -1020,7 +1417,7 @@ function registrarAuditoria(acao, nomeUsuario, emailUsuario, territorio, resulta
       sheet = ss.insertSheet("Auditoria");
       sheet.appendRow(["IdOperacao", "DataHora", "Usuario", "Email", "Acao", "Territorio", "Resultado", "Detalhes"]);
     }
-    sheet.appendRow([
+    sheet.appendRow(sanitizarLinha([
       "AUD-" + Utilities.getUuid().slice(0, 8).toUpperCase(),
       new Date(),
       nomeUsuario || "-",
@@ -1029,7 +1426,7 @@ function registrarAuditoria(acao, nomeUsuario, emailUsuario, territorio, resulta
       territorio || "-",
       resultado || "INFO",
       detalhes || ""
-    ]);
+    ], 500));
   } catch (e) {
     Logger.log("Falha ao gravar auditoria: " + e.message);
   }
@@ -1168,15 +1565,31 @@ function gerarChaveDiagnosticoSegura() {
 }
 
 function processarInspecaoSeguraPlanilha(payload) {
-  const chaveConfigurada = PropertiesService.getScriptProperties().getProperty("CLI_DIAGNOSTIC_KEY");
+  // Rota DESLIGADA por padrão. Para usar temporariamente, defina a ScriptProperty
+  // DIAGNOSTICO_HABILITADO = true no editor do Apps Script e remova ao terminar.
+  if (lerPropriedade("DIAGNOSTICO_HABILITADO", "false") !== "true") {
+    return respostaJson({ sucesso: false, codigo: 404, erro: "Rota 'dev/inspecionar-planilha' não encontrada na API." });
+  }
+
+  // Bloqueio por excesso de tentativas inválidas (força bruta / DoS)
+  const cache = CacheService.getScriptCache();
+  const janela = Math.floor(Date.now() / 600000);
+  const chaveFalhas = "RL_DIAG_FAIL_" + janela;
+  const falhas = Number(cache.get(chaveFalhas) || 0);
+  if (falhas >= CONFIG.DIAG_FALHAS_MAX_10MIN) {
+    return respostaJson({ sucesso: false, codigo: 429, erro: "Muitas tentativas inválidas. Tente novamente em alguns minutos." });
+  }
+
+  const chaveConfigurada = lerPropriedade("CLI_DIAGNOSTIC_KEY", "");
   const chaveRecebida = String(payload.diagnosticKey || "").trim();
 
-  if (!chaveConfigurada || !chaveRecebida || chaveRecebida !== chaveConfigurada) {
-    registrarAuditoria("INSPECAO_CLI_NEGADA", "CLI/Agente", "-", "-", "NEGADO", "Chave de diagnóstico ausente ou inválida");
+  if (!chaveConfigurada || !chaveRecebida || !compararSeguro(chaveRecebida, chaveConfigurada)) {
+    cache.put(chaveFalhas, String(falhas + 1), 660);
+    registrarAuditoriaLimitada("DIAG_NEGADO", 600, "INSPECAO_CLI_NEGADA", "CLI/Agente", "-", "-", "NEGADO", "Chave de diagnóstico ausente ou inválida (registro agregado a cada 10 min)");
     return respostaJson({
       sucesso: false,
       codigo: 403,
-      erro: "Chave de diagnóstico inválida ou não configurada no PropertiesService (CLI_DIAGNOSTIC_KEY)."
+      erro: "Chave de diagnóstico inválida."
     });
   }
 
@@ -1208,6 +1621,10 @@ function processarInspecaoSeguraPlanilha(payload) {
 
   if (operacao === "ler-aba") {
     const nomeAba = String(payload.aba || "Respostas").trim();
+    if (CONFIG.ABAS_BLOQUEADAS_DIAGNOSTICO.some(a => a.toLowerCase() === nomeAba.toLowerCase())) {
+      registrarAuditoria("INSPECAO_CLI_ABA_BLOQUEADA", "CLI/Agente", "automacao@local", "-", "NEGADO", `Aba sensível: ${nomeAba}`);
+      return respostaJson({ sucesso: false, codigo: 403, erro: `A aba '${nomeAba}' contém dados sensíveis e não pode ser lida pela rota de diagnóstico.` });
+    }
     const limite = Math.min(Math.max(Number(payload.limite) || 50, 1), 500);
     const sheet = ss.getSheetByName(nomeAba);
 
@@ -1353,6 +1770,12 @@ function alternarPredioTrabalhadoTransacional(usuario, payload) {
 
   for (let i = 1; i < dados.length; i++) {
     if (String(dados[i][0] || "").trim() === idPredio) {
+      // O prédio precisa pertencer ao território cuja posse foi validada acima
+      const numTerrPredio = String(dados[i][1] || "").trim().replace(/^0+/, "");
+      if (numTerrPredio !== numTerr) {
+        registrarAuditoria("PREDIO_TERRITORIO_DIVERGENTE", usuario.nome, usuario.email, numTerr, "NEGADO", `${idPredio} pertence ao T-${numTerrPredio}`);
+        return respostaJson({ sucesso: false, codigo: 403, erro: "Este prédio não pertence ao território informado." });
+      }
       sheet.getRange(i + 1, 12).setValue(dataIso);
       SpreadsheetApp.flush();
       registrarAuditoria(

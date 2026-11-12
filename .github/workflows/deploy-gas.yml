@@ -8,20 +8,36 @@ on:
       - "backend/**"
   workflow_dispatch:
 
+# Privilégio mínimo para o GITHUB_TOKEN (o job só precisa ler o código)
+permissions:
+  contents: read
+
+# Evita dois deploys simultâneos sobrescrevendo um ao outro
+concurrency:
+  group: deploy-gas
+  cancel-in-progress: false
+
 jobs:
   deploy-gas:
     runs-on: ubuntu-latest
+    # Crie o environment "production" em Settings > Environments e adicione
+    # "Required reviewers" para exigir aprovação manual antes de cada deploy.
+    # Mova os secrets CLASPRC_JSON / GAS_SCRIPT_ID / GAS_DEPLOYMENT_ID para esse environment.
+    environment: production
+    timeout-minutes: 10
     steps:
       - name: Checkout repositório
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Configurar Node.js
         uses: actions/setup-node@v4
         with:
           node-version: "20"
 
-      - name: Instalar @google/clasp
-        run: npm install -g @google/clasp
+      - name: Instalar @google/clasp (versão fixada)
+        run: npm install -g @google/clasp@3.4.1 --ignore-scripts
 
       - name: Publicar no Google Apps Script (se secrets estiverem configurados)
         env:
@@ -30,12 +46,21 @@ jobs:
           GAS_DEPLOYMENT_ID: ${{ secrets.GAS_DEPLOYMENT_ID }}
         run: |
           if [ -z "$CLASPRC_JSON" ] || [ -z "$GAS_SCRIPT_ID" ]; then
-            echo "Secrets CLASPRC_JSON ou GAS_SCRIPT_ID não configurados no GitHub. Pulando deploy automático."
-            exit 0
+            # Falha explícita: um deploy "verde" que não publicou nada esconde problemas de configuração
+            echo "::error::Secrets CLASPRC_JSON ou GAS_SCRIPT_ID não disponíveis para este job (confira o environment 'production'). Nada foi publicado."
+            exit 1
           fi
+          if [ -z "$GAS_DEPLOYMENT_ID" ]; then
+            echo "::warning::GAS_DEPLOYMENT_ID ausente: o código será enviado (push), mas a implantação do Web App NÃO será atualizada."
+          fi
+          umask 077
           echo "$CLASPRC_JSON" > ~/.clasprc.json
           printf '{"scriptId":"%s","rootDir":"backend"}\n' "$GAS_SCRIPT_ID" > .clasp.json
           clasp push --force
           if [ -n "$GAS_DEPLOYMENT_ID" ]; then
             clasp deploy -i "$GAS_DEPLOYMENT_ID" -d "Deploy automático GitHub Actions (${GITHUB_SHA::7})"
           fi
+
+      - name: Remover credenciais do runner
+        if: always()
+        run: rm -f ~/.clasprc.json .clasp.json

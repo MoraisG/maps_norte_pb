@@ -35,7 +35,7 @@ const App = {
     if ("caches" in window) {
       caches.keys().then(keys => {
         keys.forEach(k => {
-          if (k !== "territorios-pwa-shell-v7") {
+          if (k !== "territorios-pwa-shell-v8") {
             caches.delete(k).catch(() => {});
           }
         });
@@ -970,9 +970,9 @@ const App = {
         chipsContainer.innerHTML = entradasDirigentes.map(([nome, qtd]) => {
           const ativo = buscaAtual === nome.toLowerCase();
           const nomeEscapado = Utils.escapeHtml(nome);
-          const nomeJs = nome.replace(/\\/g, "\\\\").replace(/'/g, "\\'");
+          // O nome vai como dado (data-*), nunca como código JS inline: impede XSS armazenado
           return `
-            <button type="button" onclick="App.filtrarDashboardPorDirigente('${nomeJs}')"
+            <button type="button" data-dirigente="${nomeEscapado}" onclick="App.filtrarDashboardPorDirigente(this.dataset.dirigente)"
               class="px-3 py-1 rounded-full text-[11px] font-semibold border transition flex items-center gap-1.5 ${
                 ativo
                   ? "bg-[#0b57d0] text-white border-[#0b57d0]"

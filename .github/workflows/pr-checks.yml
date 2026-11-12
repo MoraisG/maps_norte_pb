@@ -1,0 +1,59 @@
+name: PR Checks
+
+on:
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr-checks-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verificar:
+    name: Sintaxe, testes e segredos
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Configurar Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Verificar sintaxe (backend + frontend)
+        run: |
+          cp backend/Code.gs "$RUNNER_TEMP/Code.js"
+          node --check "$RUNNER_TEMP/Code.js"
+          for f in js/*.js sw.js; do node --check "$f"; done
+          python3 -c "import json; json.load(open('backend/appsscript.json')); json.load(open('manifest.json'))"
+
+      - name: Testes de segurança (Apps Script simulado)
+        run: |
+          for t in tests/*.test.js; do
+            echo "▶ $t"
+            node "$t"
+          done
+
+      - name: Procurar segredos e arquivos sensíveis
+        run: |
+          set -e
+          falhou=0
+          # Arquivos que nunca devem ser versionados
+          if git ls-files | grep -Ei '(^|/)(\.env|\.clasprc\.json|\.clasp\.json|client_secret[^/]*\.json|[^/]*service-account[^/]*\.json|[^/]*credentials[^/]*\.json)$'; then
+            echo "::error::Arquivo de credencial versionado (lista acima)."; falhou=1
+          fi
+          # Padrões de conteúdo sensível
+          padroes='refresh_token"[[:space:]]*:|"client_secret"[[:space:]]*:|-----BEGIN [A-Z ]*PRIVATE KEY-----|DIAG_[a-f0-9]{32,}|ya29\.[A-Za-z0-9_-]{20,}|GOCSPX-[A-Za-z0-9_-]{10,}'
+          if git grep -nE "$padroes" -- . ':!tests/*' ':!.github/workflows/pr-checks.yml'; then
+            echo "::error::Possível segredo no código (linhas acima)."; falhou=1
+          fi
+          exit $falhou
