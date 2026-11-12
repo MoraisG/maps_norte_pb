@@ -146,14 +146,14 @@ const MapaTerritorios = {
         : `<p class="text-[11px] text-slate-400 mt-1">Sem prédios verticais mapeados</p>`;
 
       let botaoAcaoHtml = `
-        <button onclick="MapaTerritorios.abrirModalTerritorio(${Number(t.numero)})" class="mt-2.5 w-full py-1.5 px-3 bg-slate-100 hover:bg-slate-200 text-slate-800 font-semibold text-xs rounded-full transition">
+        <button data-acao="abrir-mapa" data-num="${Number(t.numero)}" class="mt-2.5 w-full py-1.5 px-3 bg-slate-100 hover:bg-slate-200 text-slate-800 font-semibold text-xs rounded-full transition">
           Ver Cartão e Prédios (${qtdPredios})
         </button>`;
 
       if (App.podeSolicitarTerritorio(t)) {
-        botaoAcaoHtml += `<button onclick="App.acaoSolicitar(${Number(t.numero)})" class="mt-1.5 w-full py-1.5 px-3 bg-[#0b57d0] hover:bg-[#0842a0] text-white font-semibold text-xs rounded-full transition">Solicitar Território ${Number(t.numero)}</button>`;
+        botaoAcaoHtml += `<button data-acao="solicitar" data-num="${Number(t.numero)}" class="mt-1.5 w-full py-1.5 px-3 bg-[#0b57d0] hover:bg-[#0842a0] text-white font-semibold text-xs rounded-full transition">Solicitar Território ${Number(t.numero)}</button>`;
       } else if (t.statusReal === "OCUPADO" && (t.emMinhaPosse || (App.usuarioAtual && App.usuarioAtual.perfil === "ADMIN"))) {
-        botaoAcaoHtml += `<button onclick="App.acaoDevolver(${Number(t.numero)})" class="mt-1.5 w-full py-1.5 px-3 bg-[#0b57d0] hover:bg-[#0842a0] text-white font-semibold text-xs rounded-full transition">Devolver Território ${Number(t.numero)}</button>`;
+        botaoAcaoHtml += `<button data-acao="devolver" data-num="${Number(t.numero)}" class="mt-1.5 w-full py-1.5 px-3 bg-[#0b57d0] hover:bg-[#0842a0] text-white font-semibold text-xs rounded-full transition">Devolver Território ${Number(t.numero)}</button>`;
       }
 
       const popupHtml = `
@@ -196,7 +196,7 @@ const MapaTerritorios = {
                 <span class="px-2 py-0.5 text-[10px] font-semibold rounded-full ${interfoneBadge.cls}">${interfoneBadge.texto}</span>
                 ${tagsBadges.map(b => `<span class="px-2 py-0.5 text-[10px] font-medium rounded-full ${b.cls}">${b.texto}</span>`).join("")}
               </div>
-              <button data-id-predio="${Utils.escapeHtml(p.idPredio)}" onclick="MapaTerritorios.abrirModalTerritorio(${Number(t.numero)}, this.dataset.idPredio)" class="mt-2 w-full py-1 px-2.5 bg-slate-100 hover:bg-slate-200 text-slate-800 font-semibold text-[11px] rounded-full transition">
+              <button data-acao="abrir-mapa" data-num="${Number(t.numero)}" data-id-predio="${Utils.escapeHtml(p.idPredio)}" class="mt-2 w-full py-1 px-2.5 bg-slate-100 hover:bg-slate-200 text-slate-800 font-semibold text-[11px] rounded-full transition">
                 Abrir Guia do Cartão ${Number(t.numero)}
               </button>
             </div>
@@ -268,12 +268,12 @@ const MapaTerritorios = {
     const acoesEl = document.getElementById("modal-mapa-acoes");
     if (App.podeSolicitarTerritorio(t)) {
       acoesEl.innerHTML = `
-        <button onclick="MapaTerritorios.fecharModalTerritorio(); App.acaoSolicitar(${Number(t.numero)});" class="m3-btn-filled text-xs">
+        <button data-acao="modal-solicitar" data-num="${Number(t.numero)}" class="m3-btn-filled text-xs">
           Solicitar Território ${Number(t.numero)}
         </button>`;
     } else if (t.statusReal === "OCUPADO" && (t.emMinhaPosse || (App.usuarioAtual && App.usuarioAtual.perfil === "ADMIN"))) {
       acoesEl.innerHTML = `
-        <button onclick="MapaTerritorios.fecharModalTerritorio(); App.acaoDevolver(${Number(t.numero)});" class="m3-btn-filled text-xs">
+        <button data-acao="modal-devolver" data-num="${Number(t.numero)}" class="m3-btn-filled text-xs">
           Devolver Território ${Number(t.numero)}
         </button>`;
     } else if (t.statusReal === "RECENTE") {
@@ -391,7 +391,7 @@ const MapaTerritorios = {
       const pinClass = this.obterClassePinoPredio(p);
 
       const btnMarcarHtml = podeMarcarPredio
-        ? `<button type="button" data-id-predio="${Utils.escapeHtml(p.idPredio)}" onclick="event.stopPropagation(); App.acaoAlternarPredioTrabalhado(this.dataset.idPredio, ${Number(t.numero)}, ${!concluido})" class="mt-2.5 w-full py-1.5 px-3 rounded-full text-[11px] font-semibold transition flex items-center justify-center gap-1.5 ${concluido ? "bg-[#e6f4ea] text-[#146c2e] border border-[#a8dab5]" : "bg-slate-100 hover:bg-[#d3e3fd] text-slate-700 hover:text-[#041e49]"}">
+        ? `<button type="button" data-acao="alternar-predio" data-num="${Number(t.numero)}" data-id-predio="${Utils.escapeHtml(p.idPredio)}" data-trabalhado="${!concluido}" class="mt-2.5 w-full py-1.5 px-3 rounded-full text-[11px] font-semibold transition flex items-center justify-center gap-1.5 ${concluido ? "bg-[#e6f4ea] text-[#146c2e] border border-[#a8dab5]" : "bg-slate-100 hover:bg-[#d3e3fd] text-slate-700 hover:text-[#041e49]"}">
             <span>${concluido ? `✓ Trabalhado (${Utils.formatarDataBr(p.ultimaDataConclusao)}) — Desfazer` : "✓ Marcar Prédio como Trabalhado"}</span>
           </button>`
         : (concluido
@@ -399,7 +399,7 @@ const MapaTerritorios = {
           : "");
 
       return `
-        <div id="card-predio-${Utils.escapeHtml(p.idPredio)}" data-id-predio="${Utils.escapeHtml(p.idPredio)}" onclick="MapaTerritorios.focarPredioNoModal(this.dataset.idPredio)" class="p-3 rounded-2xl border ${concluido ? "bg-[#f4fbf6] border-[#a8dab5]" : "bg-white border-slate-200 hover:border-slate-300"} cursor-pointer transition">
+        <div id="card-predio-${Utils.escapeHtml(p.idPredio)}" data-acao="focar-predio" data-id-predio="${Utils.escapeHtml(p.idPredio)}" class="p-3 rounded-2xl border ${concluido ? "bg-[#f4fbf6] border-[#a8dab5]" : "bg-white border-slate-200 hover:border-slate-300"} cursor-pointer transition">
           <div class="flex items-start justify-between gap-2">
             <div class="flex items-start gap-2.5 min-w-0">
               <span class="predio-pin-marker ${pinClass} shrink-0 mt-0.5">${item.ordemPin}</span>

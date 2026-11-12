@@ -35,7 +35,7 @@ const App = {
     if ("caches" in window) {
       caches.keys().then(keys => {
         keys.forEach(k => {
-          if (k !== "territorios-pwa-shell-v8") {
+          if (k !== "territorios-pwa-shell-v9") {
             caches.delete(k).catch(() => {});
           }
         });
@@ -537,7 +537,7 @@ const App = {
       }).join("");
 
       const maisPrediosHtml = qtdPredios > 3
-        ? `<button type="button" onclick="MapaTerritorios.abrirModalTerritorio(${num})" class="mt-1 w-full text-left text-[11px] font-bold text-[#0b57d0] hover:underline">
+        ? `<button type="button" data-acao="abrir-mapa" data-num="${num}" class="mt-1 w-full text-left text-[11px] font-bold text-[#0b57d0] hover:underline">
             + ${qtdPredios - 3} outro(s) prédio(s) no cartão — Ver todos no mapa →
           </button>`
         : "";
@@ -546,7 +546,7 @@ const App = {
         <div class="mt-3 p-2.5 rounded-xl bg-slate-50 border border-slate-200/90">
           <div class="flex items-center justify-between gap-2 mb-1">
             <span class="text-[11px] font-bold text-slate-800">🏢 ${qtdPredios} Prédio(s) no Cartão</span>
-            <button type="button" onclick="MapaTerritorios.abrirModalTerritorio(${num})" class="text-[11px] font-bold text-[#0b57d0] hover:underline">
+            <button type="button" data-acao="abrir-mapa" data-num="${num}" class="text-[11px] font-bold text-[#0b57d0] hover:underline">
               ${t.statusReal === "OCUPADO" ? `${prediosConcluidos}/${qtdPredios} trabalhados →` : "Mapa e Interfones →"}
             </button>
           </div>
@@ -559,14 +559,14 @@ const App = {
       infoPredios = `
         <div class="mt-3 px-3 py-2 rounded-xl bg-slate-50/70 border border-slate-200/60 flex items-center justify-between gap-2">
           <span class="text-[11px] text-slate-500">🏡 Sem prédios verticais neste cartão</span>
-          ${naFila5 ? `<button type="button" onclick="App.filtrarFilaComPredios()" class="text-[11px] font-semibold text-[#0b57d0] hover:underline shrink-0">Ver fila com prédios →</button>` : ""}
+          ${naFila5 ? `<button type="button" data-acao="filtrar-fila-predios" class="text-[11px] font-semibold text-[#0b57d0] hover:underline shrink-0">Ver fila com prédios →</button>` : ""}
         </div>`;
     }
 
     let areaAcoes = "";
     if (this.podeSolicitarTerritorio(t)) {
       areaAcoes = `
-        <button type="button" onclick="App.alternarSelecaoTerritorio(${num})"
+        <button type="button" data-acao="alternar-selecao" data-num="${num}"
           class="flex-1 py-2 px-3.5 rounded-full text-xs font-semibold transition flex items-center justify-center gap-1.5 ${
             selecionado
               ? "bg-[#0b57d0] text-white shadow-xs"
@@ -577,7 +577,7 @@ const App = {
       `;
     } else if (t.statusReal === "OCUPADO" && (t.emMinhaPosse || (this.usuarioAtual && this.usuarioAtual.perfil === "ADMIN"))) {
       areaAcoes = `
-        <button type="button" onclick="App.acaoDevolver(${num})" class="flex-1 m3-btn-filled text-xs">
+        <button type="button" data-acao="devolver" data-num="${num}" class="flex-1 m3-btn-filled text-xs">
           Devolver Território
         </button>`;
     } else if (t.statusReal === "RECENTE") {
@@ -593,7 +593,7 @@ const App = {
     }
 
     const btnMapa = t.wkt
-      ? `<button type="button" onclick="MapaTerritorios.abrirModalTerritorio(${num})" class="py-2 px-3.5 rounded-full bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-semibold transition" title="Abrir mapa e guia de prédios">
+      ? `<button type="button" data-acao="abrir-mapa" data-num="${num}" class="py-2 px-3.5 rounded-full bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-semibold transition" title="Abrir mapa e guia de prédios">
           🗺️ Mapa${qtdPredios ? ` (${qtdPredios})` : ""}
         </button>`
       : "";
@@ -837,7 +837,7 @@ const App = {
           </td>
           <td class="py-2 px-3 text-slate-500 text-[11px]">${Utils.escapeHtml(u.ultimaAtividade || "-")}</td>
           <td class="py-2 px-3">
-            <button onclick="App.preencherFormUsuario(${idx})" class="text-[#0b57d0] hover:underline font-semibold">Editar</button>
+            <button data-acao="editar-usuario" data-idx="${idx}" class="text-[#0b57d0] hover:underline font-semibold">Editar</button>
           </td>
         </tr>
       `).join("");
@@ -972,7 +972,7 @@ const App = {
           const nomeEscapado = Utils.escapeHtml(nome);
           // O nome vai como dado (data-*), nunca como código JS inline: impede XSS armazenado
           return `
-            <button type="button" data-dirigente="${nomeEscapado}" onclick="App.filtrarDashboardPorDirigente(this.dataset.dirigente)"
+            <button type="button" data-acao="filtrar-dirigente" data-dirigente="${nomeEscapado}"
               class="px-3 py-1 rounded-full text-[11px] font-semibold border transition flex items-center gap-1.5 ${
                 ativo
                   ? "bg-[#0b57d0] text-white border-[#0b57d0]"
@@ -1015,12 +1015,12 @@ const App = {
 
       const qtdPredios = Array.isArray(t.predios) ? t.predios.length : 0;
       const btnMapa = t.wkt
-        ? `<button onclick="MapaTerritorios.abrirModalTerritorio(${Number(t.numero)})" class="px-3 py-1 rounded-full bg-slate-100 hover:bg-slate-200 text-slate-700 text-[11px] font-semibold transition">🗺️ Mapa${qtdPredios ? ` (${qtdPredios})` : ""}</button>`
+        ? `<button data-acao="abrir-mapa" data-num="${Number(t.numero)}" class="px-3 py-1 rounded-full bg-slate-100 hover:bg-slate-200 text-slate-700 text-[11px] font-semibold transition">🗺️ Mapa${qtdPredios ? ` (${qtdPredios})` : ""}</button>`
         : "";
 
       const podeDevolver = t.emMinhaPosse || (this.usuarioAtual && this.usuarioAtual.perfil === "ADMIN");
       const btnDevolver = podeDevolver
-        ? `<button onclick="App.acaoDevolver(${Number(t.numero)})" class="px-3 py-1 rounded-full bg-[#0b57d0] hover:bg-[#0842a0] text-white text-[11px] font-semibold transition">Devolver</button>`
+        ? `<button data-acao="devolver" data-num="${Number(t.numero)}" class="px-3 py-1 rounded-full bg-[#0b57d0] hover:bg-[#0842a0] text-white text-[11px] font-semibold transition">Devolver</button>`
         : "";
 
       return `
@@ -1273,8 +1273,8 @@ const App = {
       <strong>Relatório Pronto (${periodoStr})</strong> — Clique em "Salvar como PDF / Imprimir".
     </div>
     <div>
-      <button class="btn-print" onclick="window.print()">🖨️ Salvar como PDF / Imprimir</button>
-      <button class="btn-close" onclick="window.close()">Fechar</button>
+      <button class="btn-print" type="button">🖨️ Salvar como PDF / Imprimir</button>
+      <button class="btn-close" type="button">Fechar</button>
     </div>
   </div>
 
@@ -1326,19 +1326,51 @@ const App = {
     </table>
   </div>
 
-  <script>
-    window.addEventListener("load", () => {
-      setTimeout(() => window.print(), 350);
-    });
-  </script>
 </body>
 </html>`;
 
     janelaPdf.document.open();
     janelaPdf.document.write(htmlDocumento);
     janelaPdf.document.close();
+
+    // A janela herda a CSP desta página (sem scripts inline): os botões são ligados daqui
+    const btnImprimir = janelaPdf.document.querySelector(".btn-print");
+    const btnFechar = janelaPdf.document.querySelector(".btn-close");
+    if (btnImprimir) btnImprimir.addEventListener("click", () => janelaPdf.print());
+    if (btnFechar) btnFechar.addEventListener("click", () => janelaPdf.close());
+    setTimeout(() => { try { janelaPdf.focus(); janelaPdf.print(); } catch (e) {} }, 400);
+
     Utils.mostrarToast("Relatório PDF gerado com sucesso!", "sucesso");
   }
 };
+
+/**
+ * Delegação central de cliques (substitui os onclick inline, permitindo CSP sem 'unsafe-inline').
+ * Os botões declaram data-acao="..." e passam parâmetros apenas como dados (data-*),
+ * nunca como código. Escuta na fase de captura para funcionar também dentro dos popups do Leaflet.
+ */
+const ACOES_UI = {
+  "abrir-mapa": el => MapaTerritorios.abrirModalTerritorio(Number(el.dataset.num), el.dataset.idPredio || undefined),
+  "solicitar": el => App.acaoSolicitar(Number(el.dataset.num)),
+  "devolver": el => App.acaoDevolver(Number(el.dataset.num)),
+  "modal-solicitar": el => { MapaTerritorios.fecharModalTerritorio(); App.acaoSolicitar(Number(el.dataset.num)); },
+  "modal-devolver": el => { MapaTerritorios.fecharModalTerritorio(); App.acaoDevolver(Number(el.dataset.num)); },
+  "alternar-selecao": el => App.alternarSelecaoTerritorio(Number(el.dataset.num)),
+  "filtrar-fila-predios": () => App.filtrarFilaComPredios(),
+  "editar-usuario": el => App.preencherFormUsuario(Number(el.dataset.idx)),
+  "filtrar-dirigente": el => App.filtrarDashboardPorDirigente(el.dataset.dirigente || ""),
+  "alternar-predio": el => App.acaoAlternarPredioTrabalhado(el.dataset.idPredio, Number(el.dataset.num), el.dataset.trabalhado === "true"),
+  "focar-predio": el => MapaTerritorios.focarPredioNoModal(el.dataset.idPredio)
+};
+
+document.addEventListener("click", (evento) => {
+  const alvo = evento.target instanceof Element ? evento.target.closest("[data-acao]") : null;
+  if (!alvo || alvo.disabled) return;
+  const acao = ACOES_UI[alvo.dataset.acao];
+  if (!acao) return;
+  // Só o elemento mais interno com data-acao é executado (equivale ao antigo stopPropagation)
+  evento.preventDefault();
+  acao(alvo, evento);
+}, true);
 
 document.addEventListener("DOMContentLoaded", () => App.init());
