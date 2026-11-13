@@ -194,3 +194,36 @@ body {
 .pin-done {
   background-color: #0b57d0;
 }
+
+/* Alfinete de Quadra Trabalhada (marcado pelo dirigente no mapa do cartão) */
+.quadra-pin-marker {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 50% 50% 50% 0;
+  transform: rotate(-45deg);
+  background-color: #146c2e;
+  border: 2px solid #ffffff;
+  box-shadow: 0 2px 6px rgba(15, 23, 42, 0.4);
+}
+.quadra-pin-marker span {
+  transform: rotate(45deg);
+  color: #ffffff;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1;
+}
+.quadra-pin-editando {
+  background-color: #0b57d0;
+  cursor: pointer;
+}
+/* Modo de marcação: cursor de mira sobre o mapa do cartão */
+.modo-marcar-quadras,
+.modo-marcar-quadras .leaflet-interactive {
+  cursor: crosshair !important;
+}
+.modo-marcar-quadras .leaflet-marker-icon {
+  cursor: pointer !important;
+}

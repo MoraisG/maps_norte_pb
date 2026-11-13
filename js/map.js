@@ -14,6 +14,13 @@ const MapaTerritorios = {
   territorioModalAtual: null,
   modalInicializado: false,
 
+  // Quadras trabalhadas (alfinetes) do cartão aberto na modal
+  LIMITE_PINOS_QUADRAS: 80,
+  quadrasLayerGroup: null,
+  quadrasEdicao: null,       // { numero, pinos: [{lat,lng}], alterado } enquanto o dirigente edita
+  modalLimitesTerritorio: null,
+  _pontosModal: [],
+
   inicializar() {
     if (this.inicializado) {
       setTimeout(() => this.map.invalidateSize(), 150);
@@ -66,6 +73,8 @@ const MapaTerritorios = {
     }).addTo(this.modalMap);
 
     this.modalLayerGroup = L.featureGroup().addTo(this.modalMap);
+    this.quadrasLayerGroup = L.featureGroup().addTo(this.modalMap);
+    this.modalMap.on("click", evento => this.aoClicarMapaModal(evento));
     this.modalInicializado = true;
   },
 
@@ -232,6 +241,11 @@ const MapaTerritorios = {
       return;
     }
 
+    // Uma edição de quadras em andamento sobrevive à re-renderização do mesmo cartão (ex.: sincronização)
+    if (this.quadrasEdicao && this.quadrasEdicao.numero !== Number(t.numero)) {
+      this.quadrasEdicao = null;
+    }
+
     this.territorioModalAtual = Number(t.numero);
     const modal = document.getElementById("modal-mapa-territorio");
     if (!modal) return;
@@ -304,6 +318,7 @@ const MapaTerritorios = {
     });
 
     this.modalLayerGroup.addLayer(poly);
+    this.modalLimitesTerritorio = poly.getBounds().pad(0.08);
 
     // Plotar pinos numerados dos prédios do cartão
     const pontos = this.deslocarCoordenadasProximas(predios);
@@ -347,7 +362,9 @@ const MapaTerritorios = {
       this.modalMarkersPorId[p.idPredio] = { marker, lat: item.lat, lng: item.lng };
     }
 
+    this._pontosModal = pontos;
     this.renderizarListaPrediosModal(t, pontos);
+    this.renderizarQuadrasModal();
 
     clearTimeout(this._modalTimer);
     this._modalTimer = setTimeout(() => {
@@ -398,6 +415,8 @@ const MapaTerritorios = {
           ? `<p class="mt-2 text-[11px] font-semibold text-[#146c2e]">✓ Trabalhado neste ciclo (${Utils.formatarDataBr(p.ultimaDataConclusao)})</p>`
           : "");
 
+      const aptosHtml = this.criarHtmlApartamentos(t, p, podeMarcarPredio);
+
       return `
         <div id="card-predio-${Utils.escapeHtml(p.idPredio)}" data-acao="focar-predio" data-id-predio="${Utils.escapeHtml(p.idPredio)}" class="p-3 rounded-2xl border ${concluido ? "bg-[#f4fbf6] border-[#a8dab5]" : "bg-white border-slate-200 hover:border-slate-300"} cursor-pointer transition">
           <div class="flex items-start justify-between gap-2">
@@ -417,10 +436,184 @@ const MapaTerritorios = {
             ${tagsBadges.map(b => `<span class="px-2 py-0.5 text-[10px] font-medium rounded-full ${b.cls}">${b.texto}</span>`).join("")}
           </div>
 
+          ${aptosHtml}
           ${btnMarcarHtml}
         </div>
       `;
     }).join("");
+
+    // Enter no campo de apartamentos equivale ao botão "Adicionar" (ligado uma única vez)
+    if (!listaEl.dataset.enterAptos) {
+      listaEl.dataset.enterAptos = "1";
+      listaEl.addEventListener("keydown", evento => {
+        if (evento.key !== "Enter" || !(evento.target instanceof HTMLInputElement) || !evento.target.dataset.aptoInput) return;
+        evento.preventDefault();
+        App.acaoAdicionarApartamentos(evento.target.dataset.aptoInput, this.territorioModalAtual);
+      });
+    }
+  },
+
+  /**
+   * Bloco "apartamentos já trabalhados" de um prédio. O histórico acompanha o prédio entre
+   * devoluções e só é zerado quando todos os prédios do cartão forem concluídos.
+   */
+  criarHtmlApartamentos(t, p, podeEditar) {
+    const aptos = Array.isArray(p.aptosTrabalhados) ? p.aptosTrabalhados : [];
+    if (!podeEditar && !aptos.length) return "";
+
+    const idPredio = Utils.escapeHtml(p.idPredio);
+    const total = Number(p.apartamentos) > 0 ? Number(p.apartamentos) : 0;
+    const contagem = total ? `${aptos.length} de ${total}` : `${aptos.length}`;
+
+    const chips = aptos.map(a => podeEditar
+      ? `<button type="button" data-acao="remover-apto" data-num="${Number(t.numero)}" data-id-predio="${idPredio}" data-apto="${Utils.escapeHtml(a)}" title="Remover apartamento ${Utils.escapeHtml(a)}" class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-semibold bg-[#e6f4ea] text-[#146c2e] border border-[#a8dab5] hover:bg-[#fce8e6] hover:text-[#b3261e] hover:border-[#f2b8b5] transition">${Utils.escapeHtml(a)} <span aria-hidden="true">×</span></button>`
+      : `<span class="px-2 py-0.5 rounded-full text-[11px] font-semibold bg-[#e6f4ea] text-[#146c2e] border border-[#a8dab5]">${Utils.escapeHtml(a)}</span>`
+    ).join("");
+
+    const formHtml = podeEditar
+      ? `<div class="mt-2 flex items-center gap-1.5">
+           <input type="text" data-apto-input="${idPredio}" inputmode="text" autocomplete="off" maxlength="120" placeholder="Ex.: 101, 102, 201" aria-label="Apartamentos trabalhados em ${Utils.escapeHtml(p.nomeEdificio)}" class="flex-1 min-w-0 px-3 py-1.5 rounded-full border border-slate-300 bg-white text-[11px] text-slate-800 focus:outline-none focus:border-[#0b57d0]" />
+           <button type="button" data-acao="adicionar-aptos" data-num="${Number(t.numero)}" data-id-predio="${idPredio}" class="shrink-0 px-3 py-1.5 rounded-full bg-[#d3e3fd] hover:bg-[#c2d7fc] text-[#041e49] text-[11px] font-semibold transition">Adicionar</button>
+         </div>`
+      : "";
+
+    return `
+      <div data-acao="bloco-aptos" class="mt-2.5 p-2.5 rounded-xl bg-slate-50 border border-slate-200/90 cursor-default">
+        <p class="text-[11px] font-bold text-slate-700">🚪 Apartamentos já trabalhados <span class="font-semibold text-slate-500">(${contagem})</span></p>
+        ${aptos.length
+          ? `<div class="mt-1.5 flex flex-wrap gap-1">${chips}</div>`
+          : `<p class="mt-1 text-[11px] text-slate-500">Nenhum apartamento registrado ainda.</p>`}
+        ${formHtml}
+      </div>`;
+  },
+
+  /**
+   * Re-renderiza apenas a lista de prédios (sem mexer no enquadramento do mapa) após registrar apartamentos
+   */
+  atualizarListaPrediosModal(idPredioFoco) {
+    const t = App.territorios.find(item => Number(item.numero) === this.territorioModalAtual);
+    if (!t) return;
+    this.renderizarListaPrediosModal(t, this._pontosModal);
+    if (idPredioFoco) {
+      const campo = Array.from(document.querySelectorAll("#modal-predios-lista input[data-apto-input]"))
+        .find(el => el.dataset.aptoInput === idPredioFoco);
+      if (campo) campo.focus({ preventScroll: true });
+    }
+  },
+
+  /**
+   * ==========================================================================
+   * QUADRAS TRABALHADAS: alfinetes que o dirigente coloca sobre as quadras já feitas.
+   * Valem apenas enquanto o cartão está em posse (são apagados na devolução).
+   * ==========================================================================
+   */
+  podeEditarQuadras(t) {
+    return Boolean(t && t.statusReal === "OCUPADO" && (t.emMinhaPosse || (App.usuarioAtual && App.usuarioAtual.perfil === "ADMIN")));
+  },
+
+  renderizarQuadrasModal() {
+    const barra = document.getElementById("modal-quadras-barra");
+    const t = App.territorios.find(item => Number(item.numero) === this.territorioModalAtual);
+    if (!t || !this.quadrasLayerGroup) return;
+
+    const editando = Boolean(this.quadrasEdicao);
+    const pinos = editando ? this.quadrasEdicao.pinos : (Array.isArray(t.quadrasTrabalhadas) ? t.quadrasTrabalhadas : []);
+
+    this.quadrasLayerGroup.clearLayers();
+    pinos.forEach((p, idx) => {
+      const icon = L.divIcon({
+        className: "",
+        html: `<div class="quadra-pin-marker ${editando ? "quadra-pin-editando" : ""}"><span>✓</span></div>`,
+        iconSize: [26, 26],
+        iconAnchor: [13, 31]
+      });
+      const marker = L.marker([p.lat, p.lng], { icon, zIndexOffset: 500, keyboard: false });
+      marker.bindTooltip(editando ? "Toque para remover" : "Quadra trabalhada", { direction: "top", offset: [0, -30] });
+      if (editando) {
+        marker.on("click", () => {
+          this.quadrasEdicao.pinos.splice(idx, 1);
+          this.quadrasEdicao.alterado = true;
+          this.renderizarQuadrasModal();
+        });
+      }
+      this.quadrasLayerGroup.addLayer(marker);
+    });
+
+    const containerMapa = document.getElementById("modal-map-container");
+    if (containerMapa) containerMapa.classList.toggle("modo-marcar-quadras", editando);
+
+    if (!barra) return;
+    const podeEditar = this.podeEditarQuadras(t);
+    if (!podeEditar && !pinos.length) {
+      barra.className = "hidden";
+      barra.innerHTML = "";
+      return;
+    }
+
+    if (editando) {
+      barra.innerHTML = `
+        <p class="text-[11px] text-[#041e49] font-medium flex-1 min-w-[180px]">
+          📍 <strong>Toque no mapa</strong> sobre cada quadra já trabalhada. Toque em um alfinete para removê-lo.
+        </p>
+        <div class="flex items-center gap-1.5">
+          <button type="button" data-acao="quadras-cancelar" class="px-3 py-1.5 rounded-full text-[11px] font-semibold text-slate-700 hover:bg-slate-200 transition">Cancelar</button>
+          <button type="button" data-acao="quadras-limpar" ${pinos.length ? "" : "disabled"} class="px-3 py-1.5 rounded-full text-[11px] font-semibold border border-slate-300 text-slate-700 hover:bg-slate-100 transition disabled:opacity-40 disabled:cursor-not-allowed">Limpar</button>
+          <button type="button" data-acao="quadras-salvar" class="px-3.5 py-1.5 rounded-full text-[11px] font-semibold bg-[#0b57d0] hover:bg-[#0842a0] text-white transition">Salvar (${pinos.length})</button>
+        </div>`;
+      barra.className = "flex flex-wrap items-center justify-between gap-2 px-3 py-2 rounded-2xl border border-[#a8c7fa] bg-[#e8f0fe]";
+    } else {
+      const resumo = pinos.length
+        ? `📍 <strong>${pinos.length}</strong> quadra(s) marcada(s) como trabalhada(s)`
+        : "📍 Nenhuma quadra marcada como trabalhada ainda";
+      barra.innerHTML = `
+        <p class="text-[11px] text-slate-700 flex-1 min-w-[160px]">${resumo}</p>
+        ${podeEditar
+          ? `<button type="button" data-acao="quadras-editar" class="px-3.5 py-1.5 rounded-full text-[11px] font-semibold bg-[#d3e3fd] hover:bg-[#c2d7fc] text-[#041e49] transition">${pinos.length ? "Editar quadras trabalhadas" : "Marcar quadras trabalhadas"}</button>`
+          : ""}`;
+      barra.className = "flex flex-wrap items-center justify-between gap-2 px-3 py-2 rounded-2xl border border-slate-200 bg-white";
+    }
+  },
+
+  iniciarEdicaoQuadras() {
+    const t = App.territorios.find(item => Number(item.numero) === this.territorioModalAtual);
+    if (!this.podeEditarQuadras(t)) return;
+    this.quadrasEdicao = {
+      numero: Number(t.numero),
+      pinos: (Array.isArray(t.quadrasTrabalhadas) ? t.quadrasTrabalhadas : []).map(p => ({ lat: p.lat, lng: p.lng })),
+      alterado: false
+    };
+    this.modalMap.closePopup();
+    this.renderizarQuadrasModal();
+  },
+
+  cancelarEdicaoQuadras() {
+    this.quadrasEdicao = null;
+    this.renderizarQuadrasModal();
+  },
+
+  limparEdicaoQuadras() {
+    if (!this.quadrasEdicao) return;
+    this.quadrasEdicao.pinos = [];
+    this.quadrasEdicao.alterado = true;
+    this.renderizarQuadrasModal();
+  },
+
+  aoClicarMapaModal(evento) {
+    if (!this.quadrasEdicao || !evento || !evento.latlng) return;
+    if (this.modalLimitesTerritorio && !this.modalLimitesTerritorio.contains(evento.latlng)) {
+      Utils.mostrarToast("Toque dentro da área do território para marcar a quadra.", "aviso");
+      return;
+    }
+    if (this.quadrasEdicao.pinos.length >= this.LIMITE_PINOS_QUADRAS) {
+      Utils.mostrarToast(`Limite de ${this.LIMITE_PINOS_QUADRAS} alfinetes por cartão atingido.`, "aviso");
+      return;
+    }
+    this.quadrasEdicao.pinos.push({
+      lat: Math.round(evento.latlng.lat * 1e6) / 1e6,
+      lng: Math.round(evento.latlng.lng * 1e6) / 1e6
+    });
+    this.quadrasEdicao.alterado = true;
+    this.renderizarQuadrasModal();
   },
 
   focarPredioNoModal(idPredio) {
@@ -432,6 +625,10 @@ const MapaTerritorios = {
 
   fecharModalTerritorio() {
     clearTimeout(this._modalTimer);
+    if (this.quadrasEdicao && this.quadrasEdicao.alterado) {
+      Utils.mostrarToast("Marcações de quadras não salvas foram descartadas.", "aviso");
+    }
+    this.quadrasEdicao = null;
     this.territorioModalAtual = null;
     const modal = document.getElementById("modal-mapa-territorio");
     if (!modal) return;
