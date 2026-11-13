@@ -35,7 +35,7 @@ const App = {
     if ("caches" in window) {
       caches.keys().then(keys => {
         keys.forEach(k => {
-          if (k !== "territorios-pwa-shell-v9") {
+          if (k !== "territorios-pwa-shell-v13") {
             caches.delete(k).catch(() => {});
           }
         });
@@ -116,7 +116,15 @@ const App = {
       });
     }
     document.addEventListener("keydown", e => {
-      if (e.key === "Escape") MapaTerritorios.fecharModalTerritorio();
+      if (e.key !== "Escape") return;
+      // O cartão de impressão abre por cima da modal: Esc fecha primeiro o que está na frente
+      if (MapaTerritorios.cartaoMap) MapaTerritorios.fecharCartaoImpressao();
+      else MapaTerritorios.fecharModalTerritorio();
+    });
+
+    // Link direto (#t=12 abre o cartão; #cartao/12 abre a versão para impressão), ex.: QR do cartão impresso
+    window.addEventListener("hashchange", () => {
+      if (this.usuarioAtual && this.territorios.length) this.processarLinkDireto();
     });
 
     // Painel Admin
@@ -228,6 +236,7 @@ const App = {
   sairParaTelaLogin(mensagemErro = "") {
     ApiClient.limparSessaoLocal();
     this.usuarioAtual = null;
+    this._linkDiretoProcessado = false;
     this.territoriosSelecionados.clear();
     this.atualizarBarraSelecaoFlutuante();
     document.getElementById("view-app").classList.add("hidden");
@@ -277,6 +286,8 @@ const App = {
     try {
       const res = await ApiClient.request("territorios/listar");
       const listaBruta = res.territorios || [];
+      // Configuração entregue só a usuários autenticados (ex.: chave de mapas da Esri)
+      if (res.config) MapaTerritorios.definirChaveEsri(res.config.chaveEsri);
       this.aplicarListaTerritoriosServidor(listaBruta);
       Utils.mostrarToast(" Fila e mapas sincronizados!", "sucesso");
     } catch (err) {
@@ -309,6 +320,30 @@ const App = {
     if (MapaTerritorios.territorioModalAtual) {
       MapaTerritorios.abrirModalTerritorio(MapaTerritorios.territorioModalAtual);
     }
+
+    // Link direto presente na URL: atendido uma vez, depois que os territórios chegam
+    if (!this._linkDiretoProcessado) {
+      this._linkDiretoProcessado = true;
+      this.processarLinkDireto();
+    }
+  },
+
+  /**
+   * Abre o cartão indicado na URL: #t=12 (mapa do cartão) ou #cartao/12 (versão para impressão).
+   * Só é chamado com o usuário autenticado; o número é validado contra a lista carregada.
+   */
+  processarLinkDireto() {
+    const hash = String(location.hash || "");
+    const cartao = /^#t=(\d{1,4})$/.exec(hash);
+    const impressao = /^#cartao\/(\d{1,4})$/.exec(hash);
+    const numero = Number((cartao || impressao || [])[1]);
+    if (!numero) return;
+    if (!this.territorios.some(t => Number(t.numero) === numero)) {
+      Utils.mostrarToast(`Território ${numero} não encontrado.`, "aviso");
+      return;
+    }
+    if (impressao) MapaTerritorios.abrirCartaoImpressao(numero);
+    else MapaTerritorios.abrirModalTerritorio(numero);
   },
 
   normalizarTerritorios(lista) {
@@ -1510,7 +1545,11 @@ const ACOES_UI = {
   "quadras-editar": () => MapaTerritorios.iniciarEdicaoQuadras(),
   "quadras-cancelar": () => MapaTerritorios.cancelarEdicaoQuadras(),
   "quadras-limpar": () => MapaTerritorios.limparEdicaoQuadras(),
-  "quadras-salvar": () => App.acaoSalvarQuadras()
+  "quadras-salvar": () => App.acaoSalvarQuadras(),
+  "mapa-alternar-rurais": () => MapaTerritorios.alternarVistaRurais(),
+  "cartao-abrir": () => { if (MapaTerritorios.territorioModalAtual) MapaTerritorios.abrirCartaoImpressao(MapaTerritorios.territorioModalAtual); },
+  "cartao-imprimir": () => MapaTerritorios.imprimirCartao(),
+  "cartao-fechar": () => MapaTerritorios.fecharCartaoImpressao()
 };
 
 document.addEventListener("click", (evento) => {

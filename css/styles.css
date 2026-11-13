@@ -152,15 +152,84 @@ body {
   background: #eef2f6;
   font-family: inherit;
 }
-.territorio-label-tooltip {
-  background: rgba(255, 255, 255, 0.94) !important;
-  border: 1px solid #cbd5e1 !important;
-  color: #0f172a !important;
+.leaflet-container .leaflet-control-attribution {
+  font-size: 10px;
+}
+
+/* Rótulos de mapa (números de territórios e quadras): texto com halo, sem caixa, sem capturar cliques.
+   O tamanho vem de --rotulo-px, definido por js/map.js conforme o zoom (também exposto em data-z). */
+.rotulo-mapa {
+  pointer-events: none !important;
+  overflow: visible;
+}
+.rotulo-mapa > span {
+  position: absolute;
+  left: 0;
+  top: 0;
+  transform: translate(-50%, -50%);
+  white-space: nowrap;
+  line-height: 1;
+  font-weight: 800;
+  font-size: calc(var(--rotulo-px, 12px) * 1.2);
+  color: #0f172a;
+  -webkit-text-stroke: 3px rgba(255, 255, 255, 0.92);
+  paint-order: stroke fill;
+  text-shadow: 0 0 2px #ffffff, 0 0 3px #ffffff;
+}
+.rotulo-mapa.rotulo-oculto {
+  display: none;
+}
+.rotulo-mapa > .rotulo-quadra {
+  font-size: calc(var(--rotulo-px, 12px) * 0.8);
+  font-weight: 600;
+  color: #475569;
+  -webkit-text-stroke-width: 2.5px;
+}
+.rotulo-mapa > .rotulo-vizinho {
+  font-size: calc(var(--rotulo-px, 12px) * 0.85);
   font-weight: 700;
-  font-size: 11px;
-  border-radius: 9999px;
-  padding: 1px 7px;
-  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.14);
+  color: #64748b;
+}
+
+/* Hachura dos territórios ocupados: a regra `fill: url(#padrao-hachura-ocupado)` fica num <style>
+   de index.html, porque em folha externa a referência seria resolvida em relação a este arquivo. */
+.svg-padroes {
+  position: absolute;
+  width: 0;
+  height: 0;
+  overflow: hidden;
+}
+
+/* Amostra da legenda gerada a partir de Utils.ESTILO_STATUS */
+.legenda-amostra {
+  display: inline-block;
+  width: 16px;
+  height: 12px;
+  border-radius: 3px;
+  box-sizing: border-box;
+}
+
+/* Indicação do norte e minimapa de localização */
+.controle-norte {
+  width: 30px;
+  height: 34px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #ffffff;
+}
+.minimapa-cartao {
+  width: 112px;
+  height: 112px;
+  border: 2px solid #ffffff;
+  border-radius: 10px;
+  box-shadow: 0 1px 5px rgba(15, 23, 42, 0.35);
+  background: #eef2f6;
+}
+@media (max-width: 639px) {
+  .minimapa-cartao {
+    display: none;
+  }
 }
 
 /* Pino Numerado de Prédios no Mapa */
@@ -226,4 +295,227 @@ body {
 }
 .modo-marcar-quadras .leaflet-marker-icon {
   cursor: pointer !important;
+}
+
+/* ==========================================================================
+   Cartão de território para impressão (A5 paisagem) — overlay #cartao-impressao
+   ========================================================================== */
+#cartao-impressao {
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+  overflow: auto;
+  background: #475569;
+  padding: 12px;
+}
+#cartao-impressao.hidden {
+  display: none;
+}
+.cartao-barra {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  max-width: 198mm;
+  margin: 0 auto 10px;
+  color: #ffffff;
+  font-size: 12px;
+}
+.cartao-barra > div {
+  display: flex;
+  gap: 8px;
+}
+.cartao-btn {
+  padding: 8px 16px;
+  border-radius: 9999px;
+  border: 1px solid #cbd5e1;
+  background: #ffffff;
+  color: #1f1f1f;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.cartao-btn-primario {
+  background: #0b57d0;
+  border-color: #0b57d0;
+  color: #ffffff;
+}
+.cartao-folha {
+  width: 198mm;
+  height: 136mm;
+  margin: 0 auto;
+  padding: 3mm;
+  box-sizing: border-box;
+  background: #ffffff;
+  color: #111827;
+  display: flex;
+  flex-direction: column;
+  gap: 2mm;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
+}
+.cartao-cartela {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 4mm;
+  border-bottom: 0.5mm solid #111827;
+  padding-bottom: 1.5mm;
+}
+.cartao-congregacao {
+  font-size: 8pt;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: #475569;
+}
+.cartao-cartela h1 {
+  font-size: 20pt;
+  font-weight: 800;
+  line-height: 1.05;
+}
+#cartao-subtitulo {
+  font-size: 10pt;
+  font-weight: 600;
+  color: #334155;
+}
+.cartao-qr-bloco {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.5mm;
+  font-size: 6.5pt;
+  color: #475569;
+}
+#cartao-qr {
+  width: 19mm;
+  height: 19mm;
+}
+#cartao-qr svg {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+.cartao-corpo {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  gap: 2.5mm;
+}
+#cartao-mapa {
+  flex: 3;
+  min-width: 0;
+  border: 0.3mm solid #94a3b8;
+}
+.cartao-lateral {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  font-size: 7pt;
+  line-height: 1.25;
+}
+.cartao-lateral h2 {
+  font-size: 7.5pt;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  border-bottom: 0.2mm solid #cbd5e1;
+  margin: 0 0 1mm;
+  padding-bottom: 0.5mm;
+}
+.cartao-legenda,
+#cartao-predios {
+  list-style: none;
+  margin: 0 0 2.5mm;
+  padding: 0;
+}
+.cartao-legenda li,
+#cartao-predios li {
+  display: flex;
+  align-items: flex-start;
+  gap: 1.5mm;
+  margin-bottom: 1mm;
+}
+.cartao-amostra {
+  flex: none;
+  width: 6mm;
+  height: 3mm;
+  margin-top: 0.3mm;
+  box-sizing: border-box;
+}
+.cartao-amostra-limite {
+  border: 0.7mm solid #111827;
+}
+.cartao-amostra-quadra {
+  border: 0.25mm dashed #334155;
+}
+.cartao-amostra-vizinho {
+  border: 0.25mm dotted #475569;
+}
+.cartao-predio-num {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 4mm;
+  height: 4mm;
+  border-radius: 9999px;
+  background: #111827;
+  color: #ffffff;
+  font-size: 6.5pt;
+  font-weight: 700;
+}
+.cartao-sem-predios {
+  color: #64748b;
+}
+.cartao-rodape {
+  display: flex;
+  justify-content: space-between;
+  gap: 4mm;
+  font-size: 6.5pt;
+  color: #475569;
+}
+.predio-pin-marker.pin-impressao {
+  width: 22px;
+  height: 22px;
+  font-size: 10px;
+  background-color: #111827;
+  box-shadow: none;
+}
+
+@media print {
+  @page {
+    size: A5 landscape;
+    margin: 6mm;
+  }
+  body.imprimindo-cartao {
+    background: #ffffff !important;
+    min-height: 0;
+  }
+  body.imprimindo-cartao > *:not(#cartao-impressao) {
+    display: none !important;
+  }
+  body.imprimindo-cartao #cartao-impressao {
+    position: static;
+    padding: 0;
+    overflow: visible;
+    background: none;
+  }
+  body.imprimindo-cartao .cartao-barra {
+    display: none;
+  }
+  body.imprimindo-cartao .cartao-folha {
+    margin: 0;
+    padding: 0;
+    box-shadow: none;
+  }
+  body.imprimindo-cartao * {
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+}
+
+/* Fundo "Mapa claro": ladrilhos do OpenStreetMap dessaturados, para os territórios se destacarem */
+.ladrilhos-claros {
+  filter: grayscale(1) brightness(1.06) contrast(0.92);
 }

@@ -61,13 +61,47 @@ const Utils = {
   },
 
   /**
+   * Fonte única do estilo por status: polígonos do mapa, legenda e etiquetas (badges).
+   * Paleta Okabe-Ito (segura para daltonismo) com um segundo sinal além da cor:
+   * espessura do traço, hachura (Ocupado), tracejado (Recente) ou ausência de preenchimento.
+   * A ordem das chaves é a ordem da legenda.
+   */
+  ESTILO_STATUS: {
+    COMIGO: {
+      rotulo: "Comigo", preenchimento: "#0072B2", opacidade: 0.35, borda: "#004B76", peso: 3,
+      badgeClass: "bg-[#0b57d0] text-white border-[#0b57d0]"
+    },
+    FILA: {
+      rotulo: "Na fila (Top 5)", preenchimento: "#009E73", opacidade: 0.3, borda: "#00664A", peso: 2.5,
+      badgeClass: "bg-[#e6f4ea] text-[#137333] border-[#ceead6]"
+    },
+    OCUPADO: {
+      rotulo: "Ocupado", preenchimento: "#E69F00", opacidade: 0.25, borda: "#8A5F00", peso: 1.5, hachura: true,
+      badgeClass: "bg-[#fef7e0] text-[#b06000] border-[#feefc3]"
+    },
+    RECENTE: {
+      rotulo: "Recente (descanso)", preenchimento: "#999999", opacidade: 0.2, borda: "#666666", peso: 1, tracejado: "5 4",
+      badgeClass: "bg-slate-100 text-slate-600 border-slate-300"
+    },
+    AGUARDANDO: {
+      rotulo: "Aguardando fila", preenchimento: "#FFFFFF", opacidade: 0.1, borda: "#64748B", peso: 1,
+      badgeClass: "bg-[#e6f4ea] text-[#137333] border-[#ceead6]"
+    }
+  },
+
+  /** Chave de ESTILO_STATUS correspondente à situação do território para o usuário atual. */
+  chaveStatus(t, naFilaTop5 = false) {
+    if (t.emMinhaPosse) return "COMIGO";
+    if (t.statusReal === "OCUPADO") return "OCUPADO";
+    if (t.statusReal === "RECENTE") return "RECENTE";
+    return naFilaTop5 ? "FILA" : "AGUARDANDO";
+  },
+
+  /**
    * Rótulo e classes visuais de status do território no padrão Google Material Design 3 (Tonal Pills)
    */
   obterEstiloStatus(t, naFilaTop5 = false) {
-    let badgeClass = "bg-[#e6f4ea] text-[#137333] border-[#ceead6]";
-    if (t.statusReal === "OCUPADO") badgeClass = "bg-[#fef7e0] text-[#b06000] border-[#feefc3]";
-    if (t.statusReal === "RECENTE") badgeClass = "bg-slate-100 text-slate-600 border-slate-300";
-    if (t.emMinhaPosse) badgeClass = "bg-[#0b57d0] text-white border-[#0b57d0]";
+    const badgeClass = this.ESTILO_STATUS[this.chaveStatus(t, naFilaTop5)].badgeClass;
 
     let label = t.statusReal;
     if (t.emMinhaPosse) {
@@ -225,33 +259,13 @@ const Utils = {
   },
 
   /**
-   * Converte geometria WKT (MultiPolygon Z / Polygon) da aba 'BASE' em coordenadas Leaflet [lat, lng]
+   * Converte geometria WKT (MultiPolygon Z / Polygon) da aba 'BASE' em partes do Leaflet:
+   * [[anelExterno, ...furos], ...] com pontos [lat, lng]. Cada parte de um MultiPolygon é um
+   * polígono próprio (antes as partes extras eram tratadas como furos da primeira).
+   * L.polygon aceita este formato diretamente.
    */
   parseWktParaPoligonosLeaflet(wkt) {
-    if (!wkt || typeof wkt !== "string") return [];
-    const limpo = wkt.trim();
-    const regexAnel = /\(\s*([^()]+)\s*\)/g;
-    const poligonos = [];
-    let match;
-
-    while ((match = regexAnel.exec(limpo)) !== null) {
-      const pares = match[1].split(",");
-      const coordenadasAnel = [];
-      for (const par of pares) {
-        const nums = par.trim().split(/\s+/);
-        if (nums.length >= 2) {
-          const lng = parseFloat(nums[0]);
-          const lat = parseFloat(nums[1]);
-          if (!isNaN(lat) && !isNaN(lng)) {
-            coordenadasAnel.push([lat, lng]);
-          }
-        }
-      }
-      if (coordenadasAnel.length >= 3) {
-        poligonos.push(coordenadasAnel);
-      }
-    }
-    return poligonos;
+    return Geo.parseWktPartes(wkt);
   }
 };
 
