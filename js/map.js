@@ -21,6 +21,37 @@ const MapaTerritorios = {
   modalLimitesTerritorio: null,
   _pontosModal: [],
 
+  // Camadas base, rótulos e quadras numeradas (geometria de quadras.geojson — não confundir com
+  // os alfinetes de "quadras trabalhadas" acima)
+  CHAVE_CAMADA_BASE: "mapa.camadaBase",
+  CAMADA_BASE_PADRAO: "Mapa claro",
+  CHAVE_NUMEROS_QUADRAS: "mapa.numerosQuadras", // "1" = exibir números das quadras no mapa geral (padrão: não)
+  // Chave de API da Esri (ArcGIS Location Platform) para o fundo de satélite.
+  // NÃO fica no código: o backend a entrega depois do login (ScriptProperty ESRI_API_KEY, em
+  // territorios/listar -> config.chaveEsri) e definirChaveEsri() a aplica. Vazia = endereço
+  // antigo sem chave. Renovação: spec/runbooks/mapas-esri-satelite.md
+  CHAVE_ESRI: "",
+  FALHAS_SATELITE_PARA_DESISTIR: 4,
+  ZOOM_MIN_DETALHES: 15,          // quadras numeradas e pinos de prédios só a partir deste zoom
+  VERSAO_QUADRAS_GEO: 13,         // manter igual ao ?v= de quadras.geojson em sw.js
+  _mapasComCamadas: [],           // [{ map, camadas }] para sincronizar a preferência entre os mapas
+  rotulosLayerGroup: null,
+  quadrasGeoLayer: null,          // mapa geral
+  modalQuadrasGeoLayer: null,     // mapa do cartão
+  modalContextoLayer: null,       // máscara do entorno + territórios vizinhos
+  minimapa: null,
+  minimapaLayer: null,
+  _quadrasGeo: null,              // Map(numeroTerritorio → [{ rotulo, lat, lng, partes, raioMetros }])
+  _quadrasGeoPromessa: null,
+  _rotulosTerritorios: [],
+  _rotulosModal: [],
+  _limitesUrbanos: null,
+  _limitesTodos: null,
+  _enquadrado: false,
+  _vendoRurais: false,
+  _contornoSelecao: null,
+  _modalEnquadradoPara: null,
+
   inicializar() {
     if (this.inicializado) {
       setTimeout(() => this.map.invalidateSize(), 150);
@@ -33,25 +64,38 @@ const MapaTerritorios = {
       zoomControl: true
     });
 
-    L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
-      maxZoom: 19,
-      attribution: "&copy; OpenStreetMap | Congregação Norte PB"
-    }).addTo(this.map);
-
+    this.criarPainesRotulos(this.map);
     this.layerGroup = L.featureGroup().addTo(this.map);
-    this.prediosLayerGroup = L.featureGroup().addTo(this.map);
+    this.quadrasGeoLayer = L.layerGroup().addTo(this.map);
+    this.prediosLayerGroup = L.featureGroup();
+    this.rotulosLayerGroup = L.layerGroup().addTo(this.map);
+    // Sem sobreposição "Quadras numeradas" aqui: no mapa geral os números são controlados
+    // apenas pela caixa "Exibir números das quadras" (os contornos continuam aparecendo de perto).
+    this.criarCamadasBase(this.map);
 
     const togglePredios = document.getElementById("toggle-map-predios");
     if (togglePredios) {
-      togglePredios.addEventListener("change", () => {
-        if (togglePredios.checked) {
-          this.map.addLayer(this.prediosLayerGroup);
-        } else {
-          this.map.removeLayer(this.prediosLayerGroup);
-        }
+      togglePredios.addEventListener("change", () => this.atualizarDetalhesPorZoom());
+    }
+
+    const toggleQuadras = document.getElementById("toggle-map-quadras");
+    if (toggleQuadras) {
+      toggleQuadras.checked = this.lerPreferenciaNumerosQuadras();
+      toggleQuadras.addEventListener("change", () => {
+        try { localStorage.setItem(this.CHAVE_NUMEROS_QUADRAS, toggleQuadras.checked ? "1" : "0"); } catch (e) {}
+        this.atualizarQuadrasGeoMapaGeral();
       });
     }
 
+    this.map.on("zoomend", () => {
+      this.atualizarRotulos(this.map, this._rotulosTerritorios);
+      this.atualizarDetalhesPorZoom();
+    });
+    this.map.on("moveend", () => this.atualizarQuadrasGeoMapaGeral());
+    this.map.on("popupclose", () => this.limparSelecao());
+
+    this.renderizarLegenda();
+    this.carregarQuadrasGeo().then(() => this.atualizarQuadrasGeoMapaGeral());
     this.inicializado = true;
   },
 
@@ -64,18 +108,470 @@ const MapaTerritorios = {
     this.modalMap = L.map("modal-map-container", {
       center: [-26.2265, -52.6725],
       zoom: 16,
-      zoomControl: true
+      zoomControl: true,
+      zoomSnap: 0.5 // enquadra melhor o cartão em telas pequenas
     });
 
-    L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
-      maxZoom: 19,
-      attribution: "&copy; OpenStreetMap | Congregação Norte PB"
-    }).addTo(this.modalMap);
-
+    this.criarPainesRotulos(this.modalMap);
+    // Ordem de inclusão = ordem de desenho: entorno, território + prédios, quadras numeradas, alfinetes
+    this.modalContextoLayer = L.layerGroup().addTo(this.modalMap);
     this.modalLayerGroup = L.featureGroup().addTo(this.modalMap);
+    this.modalQuadrasGeoLayer = L.layerGroup().addTo(this.modalMap);
     this.quadrasLayerGroup = L.featureGroup().addTo(this.modalMap);
+    this.criarCamadasBase(this.modalMap, { "Quadras numeradas": this.modalQuadrasGeoLayer });
+    this.criarMinimapa(this.modalMap);
+
+    this.modalMap.on("zoomend", () => this.atualizarRotulos(this.modalMap, this._rotulosModal));
     this.modalMap.on("click", evento => this.aoClicarMapaModal(evento));
     this.modalInicializado = true;
+  },
+
+  /**
+   * ==========================================================================
+   * CAMADAS BASE, CONTROLES E RÓTULOS (compartilhados pelo mapa geral e pelo mapa do cartão)
+   * ==========================================================================
+   */
+
+  /** Painéis próprios: nenhum deles recebe clique, para não atrapalhar polígonos e alfinetes. */
+  criarPainesRotulos(map) {
+    const criar = (nome, zIndex) => {
+      const pane = map.createPane(nome);
+      pane.style.zIndex = zIndex;
+      pane.style.pointerEvents = "none";
+    };
+    criar("quadrasGeo", 420);       // contornos das quadras, acima dos territórios (400)
+    criar("nomesRuas", 450);        // nomes de rua da camada base acima dos polígonos
+    criar("rotulosQuadras", 590);   // números das quadras, abaixo dos pinos/alfinetes (600)
+    criar("rotulosTerritorios", 650);
+  },
+
+  lerPreferenciaCamada() {
+    try {
+      return localStorage.getItem(this.CHAVE_CAMADA_BASE) || this.CAMADA_BASE_PADRAO;
+    } catch (e) {
+      return this.CAMADA_BASE_PADRAO;
+    }
+  },
+
+  /** Camadas de fundo (uma instância por mapa). O ladrilho de nomes de rua fica acima dos polígonos. */
+  criarLadrilhosBase() {
+    const osm = '&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener noreferrer">OpenStreetMap</a> contributors';
+    // Os basemaps da CARTO (Positron/Voyager) passaram a exigir chave de API; por isso o fundo
+    // claro é o próprio ladrilho do OpenStreetMap dessaturado por CSS (.ladrilhos-claros).
+    const ladrilhoOsm = opcoes => L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", Object.assign({
+      maxZoom: 20,
+      maxNativeZoom: 19,
+      attribution: osm
+    }, opcoes));
+    const satelite = this.criarCamadasSatelite();
+    const grupoSatelite = L.layerGroup([satelite.imagem, satelite.nomes]);
+    grupoSatelite.camadaImagem = satelite.imagem;
+
+    return {
+      "Mapa claro": ladrilhoOsm({ className: "ladrilhos-claros" }),
+      "Ruas": ladrilhoOsm(),
+      // No satélite, os nomes das vias vêm num ladrilho transparente desenhado acima dos polígonos
+      "Satélite": grupoSatelite
+    };
+  },
+
+  /** Foto de satélite + ladrilho transparente de nomes de vias, conforme haja ou não chave da Esri. */
+  criarCamadasSatelite() {
+    const atribEsri = 'Imagens &copy; <a href="https://www.esri.com/" target="_blank" rel="noopener noreferrer">Esri</a>, Maxar, Earthstar Geographics e comunidade GIS';
+    // Com chave: serviço oficial de mapas-base (ibasemaps-api). Sem chave: endereço antigo.
+    const chaveEsri = String(this.CHAVE_ESRI || "").trim();
+    const baseEsri = chaveEsri
+      ? "https://ibasemaps-api.arcgis.com/arcgis/rest/services"
+      : "https://server.arcgisonline.com/ArcGIS/rest/services";
+    const sufixoEsri = chaveEsri ? `?token=${encodeURIComponent(chaveEsri)}` : "";
+    const esri = (servico, opcoes) => L.tileLayer(`${baseEsri}/${servico}/MapServer/tile/{z}/{y}/{x}${sufixoEsri}`, Object.assign({
+      maxZoom: 20,
+      maxNativeZoom: 18,
+      attribution: atribEsri
+    }, opcoes));
+    const imagemSatelite = esri("World_Imagery");
+    // Nomes e traçado das vias sobre o satélite, desenhados acima dos polígonos (pane nomesRuas).
+    // Com chave: estilo transparente "arcgis/imagery/labels" do serviço Static Basemap Tiles
+    // (ladrilhos de 512 px). Sem chave: ladrilho de referência do endereço antigo.
+    const nomesVias = chaveEsri
+      ? L.tileLayer(`https://static-map-tiles-api.arcgis.com/arcgis/rest/services/static-basemap-tiles-service/v1/arcgis/imagery/labels/static/tile/{z}/{y}/{x}${sufixoEsri}`, {
+          pane: "nomesRuas",
+          tileSize: 512,
+          zoomOffset: -1,
+          maxZoom: 20,
+          maxNativeZoom: 19,
+          attribution: atribEsri
+        })
+      : esri("Reference/World_Transportation", { pane: "nomesRuas" });
+    return { imagem: imagemSatelite, nomes: nomesVias };
+  },
+
+  /**
+   * Recebe a chave da Esri entregue pelo backend. Se mudou, recria as camadas de satélite dos
+   * mapas já abertos (o grupo "Satélite" é o mesmo; só o conteúdo é trocado).
+   */
+  definirChaveEsri(chave) {
+    const nova = String(chave || "").trim();
+    if (nova === this.CHAVE_ESRI) return;
+    this.CHAVE_ESRI = nova;
+    this._avisouFalhaSatelite = false;
+    for (const item of this._mapasComCamadas) {
+      const grupo = item.camadas["Satélite"];
+      if (!grupo) continue;
+      const satelite = this.criarCamadasSatelite();
+      grupo.clearLayers();
+      grupo.addLayer(satelite.imagem);
+      grupo.addLayer(satelite.nomes);
+      grupo.camadaImagem = satelite.imagem;
+      this.vigiarFalhaSatelite(item.map, item.camadas);
+    }
+  },
+
+  /**
+   * Se o satélite falhar repetidamente (chave vencida, cota esgotada, serviço fora do ar),
+   * avisa uma vez e volta ao fundo padrão em vez de deixar o mapa cinza.
+   */
+  vigiarFalhaSatelite(map, camadas) {
+    const grupo = camadas["Satélite"];
+    const imagem = grupo && grupo.camadaImagem;
+    if (!imagem) return;
+    let falhasSeguidas = 0;
+    imagem.on("tileload", () => { falhasSeguidas = 0; });
+    imagem.on("tileerror", () => {
+      falhasSeguidas++;
+      if (falhasSeguidas < this.FALHAS_SATELITE_PARA_DESISTIR || !map.hasLayer(grupo)) return;
+      falhasSeguidas = 0;
+      map.removeLayer(grupo);
+      map.addLayer(camadas[this.CAMADA_BASE_PADRAO]);
+      try { localStorage.setItem(this.CHAVE_CAMADA_BASE, this.CAMADA_BASE_PADRAO); } catch (e) {}
+      if (!this._avisouFalhaSatelite) {
+        this._avisouFalhaSatelite = true;
+        Utils.mostrarToast("O fundo de satélite está indisponível no momento. Voltamos ao mapa claro.", "aviso");
+      }
+    });
+  },
+
+  /**
+   * Ponto único de criação das camadas base + seletor, escala, norte e atribuição.
+   * A escolha do usuário fica em localStorage e vale para todos os mapas.
+   */
+  criarCamadasBase(map, sobreposicoes) {
+    const camadas = this.criarLadrilhosBase();
+    const preferida = this.lerPreferenciaCamada();
+    camadas[camadas[preferida] ? preferida : this.CAMADA_BASE_PADRAO].addTo(map);
+
+    L.control.layers(camadas, sobreposicoes || {}, { position: "topright", collapsed: true }).addTo(map);
+    L.control.scale({ imperial: false, maxWidth: 120, position: "bottomleft" }).addTo(map);
+    this.criarControleNorte().addTo(map);
+    if (map.attributionControl) map.attributionControl.setPrefix("Congregação Norte PB");
+
+    this.vigiarFalhaSatelite(map, camadas);
+    this._mapasComCamadas.push({ map, camadas });
+    map.on("baselayerchange", evento => {
+      try { localStorage.setItem(this.CHAVE_CAMADA_BASE, evento.name); } catch (e) {}
+      // Replica a escolha nos outros mapas já criados
+      for (const outro of this._mapasComCamadas) {
+        if (outro.map === map || !outro.camadas[evento.name] || outro.map.hasLayer(outro.camadas[evento.name])) continue;
+        Object.values(outro.camadas).forEach(camada => outro.map.removeLayer(camada));
+        outro.map.addLayer(outro.camadas[evento.name]);
+      }
+    });
+    return camadas;
+  },
+
+  criarControleNorte() {
+    const Controle = L.Control.extend({
+      options: { position: "topleft" },
+      onAdd() {
+        const el = L.DomUtil.create("div", "leaflet-bar controle-norte");
+        el.title = "Norte";
+        el.setAttribute("aria-label", "Indicação do norte");
+        el.innerHTML = '<svg viewBox="0 0 24 30" width="22" height="28" aria-hidden="true"><path d="M12 9 L18 27 L12 23 L6 27 Z" fill="#1f2937"/><path d="M12 9 L12 23 L6 27 Z" fill="#9ca3af"/><text x="12" y="8" text-anchor="middle" font-size="9" font-weight="700" fill="#1f2937">N</text></svg>';
+        L.DomEvent.disableClickPropagation(el);
+        return el;
+      }
+    });
+    return new Controle();
+  },
+
+  /** Opções de L.polygon para um status (ver Utils.ESTILO_STATUS). */
+  estiloPoligono(chave) {
+    const e = Utils.ESTILO_STATUS[chave] || Utils.ESTILO_STATUS.AGUARDANDO;
+    return {
+      color: e.borda,
+      weight: e.peso,
+      fillColor: e.preenchimento,
+      fillOpacity: e.opacidade,
+      dashArray: e.tracejado || null,
+      lineJoin: "round",
+      className: e.hachura ? "poligono-hachura-ocupado" : ""
+    };
+  },
+
+  hexParaRgba(hex, alfa) {
+    const n = parseInt(String(hex).replace("#", ""), 16);
+    return `rgba(${(n >> 16) & 255}, ${(n >> 8) & 255}, ${n & 255}, ${alfa})`;
+  },
+
+  /** Legenda gerada da mesma tabela que colore os polígonos. */
+  renderizarLegenda() {
+    const el = document.getElementById("mapa-legenda");
+    if (!el) return;
+    el.innerHTML = Object.keys(Utils.ESTILO_STATUS).map(chave => {
+      const e = Utils.ESTILO_STATUS[chave];
+      const fundo = e.hachura
+        ? `repeating-linear-gradient(45deg, ${this.hexParaRgba(e.preenchimento, 0.3)} 0 3px, ${this.hexParaRgba(e.borda, 0.75)} 3px 4.5px)`
+        : this.hexParaRgba(e.preenchimento, Math.min(1, e.opacidade + 0.15));
+      const borda = `${Math.max(1, Math.round(e.peso))}px ${e.tracejado ? "dashed" : "solid"} ${e.borda}`;
+      return `<span class="flex items-center gap-1.5"><span class="legenda-amostra" style="background:${fundo};border:${borda}"></span>${Utils.escapeHtml(e.rotulo)}</span>`;
+    }).join("");
+  },
+
+  tamanhoRotuloPorZoom(zoom) {
+    if (zoom >= 17) return 17;
+    if (zoom >= 16) return 15;
+    if (zoom >= 15) return 13;
+    if (zoom >= 14) return 12;
+    if (zoom >= 13) return 11;
+    return 10;
+  },
+
+  /** Marcador de texto não interativo (número do território ou da quadra). */
+  criarRotulo(lat, lng, texto, classe, pane) {
+    return L.marker([lat, lng], {
+      icon: L.divIcon({ className: "rotulo-mapa", html: `<span class="${classe}">${Utils.escapeHtml(texto)}</span>`, iconSize: [0, 0] }),
+      interactive: false,
+      keyboard: false,
+      pane
+    });
+  },
+
+  /**
+   * Tamanho por zoom e visibilidade sem motor de colisão: o rótulo aparece quando o maior
+   * círculo inscrito no polígono (em pixels) comporta o texto.
+   * rotulos = [{ marker, lat, raioMetros, texto, escala?, sempre? }]
+   */
+  atualizarRotulos(map, rotulos) {
+    if (!map) return;
+    const zoom = map.getZoom();
+    const tamanho = this.tamanhoRotuloPorZoom(zoom);
+    const container = map.getContainer();
+    container.dataset.z = String(Math.round(zoom));
+    container.style.setProperty("--rotulo-px", `${tamanho}px`);
+
+    for (const r of rotulos || []) {
+      const el = r.marker.getElement();
+      if (!el) continue;
+      const metrosPorPixel = (156543.03392 * Math.cos((r.lat * Math.PI) / 180)) / Math.pow(2, zoom);
+      const larguraTexto = String(r.texto).length * tamanho * (r.escala || 1.2) * 0.62;
+      const visivel = r.sempre || zoom >= 17 || r.raioMetros / metrosPorPixel >= 0.5 * larguraTexto;
+      el.classList.toggle("rotulo-oculto", !visivel);
+    }
+  },
+
+  /** Pinos de prédios só aparecem de perto (e se a caixa "Exibir pinos" estiver marcada). */
+  atualizarDetalhesPorZoom() {
+    if (!this.map) return;
+    const toggle = document.getElementById("toggle-map-predios");
+    const mostrar = (!toggle || toggle.checked) && this.map.getZoom() >= this.ZOOM_MIN_DETALHES;
+    if (mostrar && !this.map.hasLayer(this.prediosLayerGroup)) this.map.addLayer(this.prediosLayerGroup);
+    if (!mostrar && this.map.hasLayer(this.prediosLayerGroup)) this.map.removeLayer(this.prediosLayerGroup);
+  },
+
+  /** Contorno duplo no território selecionado (popup aberto). */
+  selecionarPoligono(poly, partes) {
+    this.limparSelecao();
+    this._contornoSelecao = L.polygon(partes, {
+      fill: false, color: "#111827", weight: (poly.options.weight || 2) + 5, opacity: 0.85, interactive: false, lineJoin: "round"
+    }).addTo(this.map);
+    poly.bringToFront();
+  },
+
+  limparSelecao() {
+    if (this._contornoSelecao) {
+      this.map.removeLayer(this._contornoSelecao);
+      this._contornoSelecao = null;
+    }
+  },
+
+  ehRural(t) {
+    return String((t && t.tipo) || "").trim().toLowerCase() === "rural";
+  },
+
+  /** Alterna o enquadramento entre a área urbana e todos os territórios (inclui rurais). */
+  alternarVistaRurais() {
+    if (!this.map) return;
+    this._vendoRurais = !this._vendoRurais;
+    this.enquadrarMapaGeral();
+  },
+
+  enquadrarMapaGeral() {
+    const urbanos = this._limitesUrbanos && this._limitesUrbanos.isValid() ? this._limitesUrbanos : null;
+    const todos = this._limitesTodos && this._limitesTodos.isValid() ? this._limitesTodos : null;
+    const alvo = this._vendoRurais ? todos : (urbanos || todos);
+    if (!alvo) return false;
+    this.map.fitBounds(alvo, { padding: [20, 20] });
+    const btn = document.getElementById("btn-mapa-rurais");
+    if (btn) {
+      btn.textContent = this._vendoRurais ? "Ver área urbana" : "Ver rurais";
+      // Sem territórios rurais (ou só rurais) não há o que alternar
+      btn.classList.toggle("hidden", !urbanos || !todos || urbanos.equals(todos));
+    }
+    return true;
+  },
+
+  /**
+   * ==========================================================================
+   * QUADRAS NUMERADAS (quadras.geojson, gerado por scripts/quadras/gerar-quadras.js)
+   * Contornos e números nunca são interativos: o clique atravessa até o território/mapa.
+   * ==========================================================================
+   */
+  carregarQuadrasGeo() {
+    if (!this._quadrasGeoPromessa) {
+      this._quadrasGeoPromessa = fetch(`quadras.geojson?v=${this.VERSAO_QUADRAS_GEO}`)
+        .then(resposta => (resposta.ok ? resposta.json() : Promise.reject(new Error(`HTTP ${resposta.status}`))))
+        .then(geo => {
+          const indice = new Map();
+          for (const f of geo.features || []) {
+            const p = f.properties || {};
+            const g = f.geometry || {};
+            const poligonos = g.type === "Polygon" ? [g.coordinates] : (g.type === "MultiPolygon" ? g.coordinates : []);
+            const partes = poligonos.map(pol => pol.map(anel => anel.map(c => [c[1], c[0]])));
+            if (!partes.length) continue;
+            const numero = Number(p.NUM_TERR);
+            if (!indice.has(numero)) indice.set(numero, []);
+            indice.get(numero).push({
+              id: String(p.ID_QUADRA || ""),
+              rotulo: String(p.ROTULO || p.NUM_QUADRA || ""),
+              lat: Number(p.LABEL_LAT),
+              lng: Number(p.LABEL_LNG),
+              partes,
+              raioMetros: null
+            });
+          }
+          this._quadrasGeo = indice;
+        })
+        .catch(() => {
+          // Sem o arquivo (ou offline sem cache) o mapa segue funcionando só com os territórios
+          this._quadrasGeo = new Map();
+        });
+    }
+    return this._quadrasGeoPromessa;
+  },
+
+  /** Preferência do mapa geral: exibir os números das quadras? Sem escolha salva, não. */
+  lerPreferenciaNumerosQuadras() {
+    try {
+      return localStorage.getItem(this.CHAVE_NUMEROS_QUADRAS) === "1";
+    } catch (e) {
+      return false;
+    }
+  },
+
+  /**
+   * Desenha quadras (contorno fino tracejado + número) em um grupo de camadas.
+   * comNumeros = false desenha só os contornos (mapa geral com a caixa desmarcada).
+   */
+  desenharQuadrasGeo(grupo, quadras, rotulos, comNumeros = true) {
+    for (const q of quadras) {
+      grupo.addLayer(L.polygon(q.partes, {
+        pane: "quadrasGeo", interactive: false, fill: false,
+        color: "#334155", weight: 0.8, opacity: 0.9, dashArray: "4 3"
+      }));
+      if (!comNumeros || !q.rotulo || !isFinite(q.lat) || !isFinite(q.lng)) continue;
+      if (q.raioMetros === null) {
+        const ponto = Geo.pontoRotuloLatLng(q.partes, 2);
+        q.raioMetros = ponto ? ponto.raioMetros : 0;
+      }
+      const marker = this.criarRotulo(q.lat, q.lng, q.rotulo, "rotulo-quadra", "rotulosQuadras");
+      grupo.addLayer(marker);
+      rotulos.push({ marker, lat: q.lat, raioMetros: q.raioMetros, texto: q.rotulo, escala: 0.8 });
+    }
+  },
+
+  /**
+   * Mapa geral: só as quadras da área visível, e apenas de perto (zoom ≥ 15).
+   * Os contornos sempre aparecem; os números, só com a caixa "Exibir números das quadras" marcada.
+   */
+  atualizarQuadrasGeoMapaGeral() {
+    if (!this.map || !this.quadrasGeoLayer) return;
+    this.quadrasGeoLayer.clearLayers();
+    if (!this._quadrasGeo || this.map.getZoom() < this.ZOOM_MIN_DETALHES) return;
+    const toggle = document.getElementById("toggle-map-quadras");
+    const comNumeros = toggle ? toggle.checked : this.lerPreferenciaNumerosQuadras();
+
+    const limites = this.map.getBounds().pad(0.15);
+    const visiveis = [];
+    for (const lista of this._quadrasGeo.values()) {
+      for (const q of lista) if (limites.contains([q.lat, q.lng])) visiveis.push(q);
+    }
+    const rotulos = [];
+    this.desenharQuadrasGeo(this.quadrasGeoLayer, visiveis, rotulos, comNumeros);
+    this.atualizarRotulos(this.map, rotulos);
+  },
+
+  /** Mapa do cartão: todas as quadras do território aberto. */
+  renderizarQuadrasGeoModal() {
+    if (!this.modalQuadrasGeoLayer) return;
+    const numero = this.territorioModalAtual;
+    this.carregarQuadrasGeo().then(() => {
+      if (numero !== this.territorioModalAtual) return;
+      this.modalQuadrasGeoLayer.clearLayers();
+      this._rotulosModal = this._rotulosModal.filter(r => !r.quadra);
+      const rotulos = [];
+      this.desenharQuadrasGeo(this.modalQuadrasGeoLayer, this._quadrasGeo.get(numero) || [], rotulos);
+      rotulos.forEach(r => { r.quadra = true; });
+      this._rotulosModal = this._rotulosModal.concat(rotulos);
+      this.atualizarRotulos(this.modalMap, this._rotulosModal);
+    });
+  },
+
+  /** Minimapa de localização no canto do mapa do cartão (some em telas estreitas, via CSS). */
+  criarMinimapa(mapaPai) {
+    const self = this;
+    const Controle = L.Control.extend({
+      options: { position: "bottomright" },
+      onAdd() {
+        const el = L.DomUtil.create("div", "minimapa-cartao");
+        el.setAttribute("aria-hidden", "true");
+        L.DomEvent.disableClickPropagation(el);
+        L.DomEvent.disableScrollPropagation(el);
+        self.minimapa = L.map(el, {
+          zoomControl: false, attributionControl: false, dragging: false, touchZoom: false, doubleClickZoom: false,
+          scrollWheelZoom: false, boxZoom: false, keyboard: false, zoomSnap: 0.25
+        });
+        L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", { maxZoom: 19, className: "ladrilhos-claros" }).addTo(self.minimapa);
+        self.minimapaLayer = L.layerGroup().addTo(self.minimapa);
+        self.minimapa.setView([-26.2265, -52.6725], 11);
+        return el;
+      }
+    });
+    new Controle().addTo(mapaPai);
+  },
+
+  /**
+   * Geometria já convertida de cada território (partes do Leaflet, limites e ponto de rótulo),
+   * recalculada só quando a lista de territórios muda.
+   */
+  obterGeometrias() {
+    if (this._geometriasRef !== App.territorios) {
+      const itens = new Map();
+      const urbanos = L.latLngBounds([]);
+      const todos = L.latLngBounds([]);
+      for (const t of App.territorios || []) {
+        if (!t.wkt) continue;
+        const partes = Utils.parseWktParaPoligonosLeaflet(t.wkt);
+        if (!partes.length) continue;
+        const limites = L.latLngBounds([]);
+        partes.forEach(parte => limites.extend(parte[0]));
+        todos.extend(limites);
+        if (!this.ehRural(t)) urbanos.extend(limites);
+        itens.set(Number(t.numero), { partes, limites, rotulo: Geo.pontoRotuloLatLng(partes) });
+      }
+      this._geometrias = { itens, urbanos, todos };
+      this._geometriasRef = App.territorios;
+    }
+    return this._geometrias;
   },
 
   obterClassePinoPredio(p) {
@@ -116,35 +612,46 @@ const MapaTerritorios = {
 
   renderizarPoligonos(territorios) {
     if (!this.inicializado) this.inicializar();
+    this.limparSelecao();
     this.layerGroup.clearLayers();
     this.prediosLayerGroup.clearLayers();
+    this.rotulosLayerGroup.clearLayers();
+    this._rotulosTerritorios = [];
 
     let temPoligonos = false;
     const filaTop5Set = new Set((App.obterFilaCincoDisponiveis ? App.obterFilaCincoDisponiveis() : []).map(x => Number(x.numero)));
+    const geometrias = this.obterGeometrias();
+    const temPonteiro = !window.matchMedia || window.matchMedia("(hover: hover)").matches;
 
     for (const t of territorios) {
-      if (!t.wkt) continue;
-      const aneis = Utils.parseWktParaPoligonosLeaflet(t.wkt);
-      if (!aneis.length) continue;
+      const geometria = geometrias.itens.get(Number(t.numero));
+      if (!geometria) continue;
+      const aneis = geometria.partes;
 
       temPoligonos = true;
       const naFilaTop5 = filaTop5Set.has(Number(t.numero));
-      const cor = this.obterCorStatus(t, naFilaTop5);
+      const estilo = this.estiloPoligono(Utils.chaveStatus(t, naFilaTop5));
+      const cor = { borda: estilo.color, preenchimento: estilo.fillColor };
       const qtdPredios = Array.isArray(t.predios) ? t.predios.length : 0;
 
-      const poly = L.polygon(aneis, {
-        color: cor.borda,
-        weight: t.emMinhaPosse || naFilaTop5 ? 2.6 : 1.5,
-        fillColor: cor.preenchimento,
-        fillOpacity: t.emMinhaPosse ? 0.45 : (naFilaTop5 ? 0.35 : 0.22)
-      });
+      const poly = L.polygon(aneis, estilo);
 
-      const labelTooltip = qtdPredios > 0 ? `${t.numero} (${qtdPredios}🏢)` : `${t.numero}`;
-      poly.bindTooltip(labelTooltip, {
-        permanent: true,
-        direction: "center",
-        className: "territorio-label-tooltip"
-      });
+      // Realce ao passar o mouse (em telas de toque só existe a seleção, pelo popup)
+      if (temPonteiro) {
+        poly.on("mouseover", () => {
+          poly.setStyle({ weight: estilo.weight + 1.5, fillOpacity: Math.min(0.6, estilo.fillOpacity + 0.15) });
+        });
+        poly.on("mouseout", () => poly.setStyle({ weight: estilo.weight, fillOpacity: estilo.fillOpacity }));
+      }
+      poly.on("popupopen", () => this.selecionarPoligono(poly, aneis));
+
+      // Número do território no polo de inacessibilidade da maior parte (sempre dentro do polígono)
+      if (geometria.rotulo) {
+        const texto = String(Number(t.numero));
+        const marker = this.criarRotulo(geometria.rotulo.lat, geometria.rotulo.lng, texto, "rotulo-territorio", "rotulosTerritorios");
+        this.rotulosLayerGroup.addLayer(marker);
+        this._rotulosTerritorios.push({ marker, lat: geometria.rotulo.lat, raioMetros: geometria.rotulo.raioMetros, texto });
+      }
 
       const dirInfo = t.statusReal === "OCUPADO"
         ? `<p class="text-xs text-[#b06000] font-medium mt-1">👤 Com: <strong>${Utils.escapeHtml(t.dirigente || "Dirigente")}</strong></p>`
@@ -169,7 +676,7 @@ const MapaTerritorios = {
         <div class="min-w-[210px] p-1">
           <div class="flex items-center justify-between gap-2">
             <span class="text-sm font-bold text-slate-900">Território ${Number(t.numero)}</span>
-            <span class="px-2 py-0.5 text-[10px] font-bold rounded-full" style="background:${cor.preenchimento}22;color:${cor.borda};border:1px solid ${cor.borda}55">${Utils.escapeHtml(naFilaTop5 ? "NA FILA" : t.statusReal)}</span>
+            <span class="px-2 py-0.5 text-[10px] font-bold rounded-full" style="background:${this.hexParaRgba(cor.preenchimento, 0.14)};color:${cor.borda};border:1px solid ${this.hexParaRgba(cor.borda, 0.35)}">${Utils.escapeHtml(naFilaTop5 ? "NA FILA" : t.statusReal)}</span>
           </div>
           <p class="text-xs text-slate-600 font-medium mt-0.5">${Utils.escapeHtml(t.bairro)} (${Utils.escapeHtml(t.tipo)})</p>
           ${dirInfo}
@@ -215,11 +722,19 @@ const MapaTerritorios = {
       }
     }
 
+    this._limitesUrbanos = geometrias.urbanos;
+    this._limitesTodos = geometrias.todos;
+    this.atualizarRotulos(this.map, this._rotulosTerritorios);
+    this.atualizarDetalhesPorZoom();
+
     if (temPoligonos) {
       setTimeout(() => {
         this.map.invalidateSize();
+        // Enquadra só na primeira renderização visível (área urbana); depois preserva a vista do usuário
+        const container = this.map.getContainer();
+        if (this._enquadrado || !container.offsetWidth || !container.offsetHeight) return;
         try {
-          this.map.fitBounds(this.layerGroup.getBounds(), { padding: [20, 20] });
+          this._enquadrado = this.enquadrarMapaGeral();
         } catch (e) {}
       }, 200);
     }
@@ -303,19 +818,21 @@ const MapaTerritorios = {
     this.modalLayerGroup.clearLayers();
     this.modalMarkersPorId = {};
 
-    const cor = this.obterCorStatus(t, filaTop5Set.has(Number(t.numero)));
-    const poly = L.polygon(aneis, {
-      color: cor.borda,
-      weight: 3,
-      fillColor: cor.preenchimento,
-      fillOpacity: 0.22
-    });
+    // Entorno esmaecido (máscara invertida) + vizinhos em traço fino com o número
+    this.modalContextoLayer.clearLayers();
+    this._rotulosModal = [];
+    this.desenharContextoTerritorio(this.modalContextoLayer, t, aneis, this._rotulosModal, { opacidadeMascara: 0.35 });
+    // Contorno branco por baixo do traço do território: contraste garantido também sobre o satélite
+    this.modalContextoLayer.addLayer(L.polygon(aneis, { fill: false, color: "#ffffff", weight: 7, opacity: 0.9, lineJoin: "round", interactive: false }));
 
-    poly.bindTooltip(`Território ${Number(t.numero)} — ${Utils.escapeHtml(t.bairro)}`, {
-      permanent: false,
-      direction: "center",
-      className: "territorio-label-tooltip"
-    });
+    // No cartão o preenchimento é leve para a base (ruas e nomes) continuar legível
+    const estilo = this.estiloPoligono(Utils.chaveStatus(t, filaTop5Set.has(Number(t.numero))));
+    const poly = L.polygon(aneis, Object.assign({}, estilo, {
+      weight: 3,
+      dashArray: null,
+      className: "",
+      fillOpacity: Math.min(estilo.fillOpacity, 0.12)
+    }));
 
     this.modalLayerGroup.addLayer(poly);
     this.modalLimitesTerritorio = poly.getBounds().pad(0.08);
@@ -365,18 +882,65 @@ const MapaTerritorios = {
     this._pontosModal = pontos;
     this.renderizarListaPrediosModal(t, pontos);
     this.renderizarQuadrasModal();
+    this.renderizarQuadrasGeoModal();
+    this.atualizarRotulos(this.modalMap, this._rotulosModal);
 
+    const limitesCartao = poly.getBounds();
     clearTimeout(this._modalTimer);
     this._modalTimer = setTimeout(() => {
       this.modalMap.invalidateSize();
       try {
         if (idPredioDestaque && this.modalMarkersPorId[idPredioDestaque]) {
           this.focarPredioNoModal(idPredioDestaque);
-        } else {
-          this.modalMap.fitBounds(this.modalLayerGroup.getBounds(), { maxZoom: 17, padding: [30, 30] });
+        } else if (this._modalEnquadradoPara !== Number(t.numero)) {
+          // Reabrir o mesmo cartão (ex.: sincronização) não desfaz o zoom/posição do usuário
+          this.modalMap.fitBounds(limitesCartao, { maxZoom: 18, padding: [16, 16] });
         }
+        this._modalEnquadradoPara = Number(t.numero);
+        this.atualizarMinimapa(aneis, limitesCartao);
       } catch (e) {}
     }, 150);
+  },
+
+  /**
+   * Máscara invertida (escurece tudo fora do território) e territórios vizinhos em traço fino,
+   * com o número de cada um. Nada aqui é interativo.
+   */
+  desenharContextoTerritorio(grupo, t, partes, rotulos, opcoes) {
+    const op = opcoes || {};
+    const mundo = [[-85, -180], [-85, 180], [85, 180], [85, -180]];
+    grupo.addLayer(L.polygon([mundo].concat(partes.map(parte => parte[0])), {
+      stroke: false, fillColor: op.corMascara || "#0f172a", fillOpacity: op.opacidadeMascara, interactive: false
+    }));
+
+    const geometrias = this.obterGeometrias();
+    const atual = geometrias.itens.get(Number(t.numero));
+    if (!atual) return;
+    const alcance = atual.limites.pad(0.6);
+    for (const [numero, g] of geometrias.itens) {
+      if (numero === Number(t.numero) || !alcance.intersects(g.limites)) continue;
+      grupo.addLayer(L.polygon(g.partes, {
+        fill: false, color: op.corVizinhos || "#475569", weight: 1, opacity: 0.8, dashArray: "2 4", interactive: false
+      }));
+      if (g.rotulo && alcance.contains([g.rotulo.lat, g.rotulo.lng])) {
+        const marker = this.criarRotulo(g.rotulo.lat, g.rotulo.lng, String(numero), "rotulo-vizinho", "rotulosQuadras");
+        grupo.addLayer(marker);
+        rotulos.push({ marker, lat: g.rotulo.lat, raioMetros: g.rotulo.raioMetros, texto: String(numero) });
+      }
+    }
+  },
+
+  atualizarMinimapa(partes, limitesCartao) {
+    if (!this.minimapa) return;
+    const geometrias = this.obterGeometrias();
+    this.minimapaLayer.clearLayers();
+    const contexto = L.latLngBounds(limitesCartao.getSouthWest(), limitesCartao.getNorthEast());
+    if (geometrias.urbanos.isValid()) contexto.extend(geometrias.urbanos);
+    this.minimapaLayer.addLayer(L.polygon(partes, { color: "#b91c1c", weight: 2, fillColor: "#ef4444", fillOpacity: 0.6, interactive: false }));
+    // Território pequeno demais para aparecer no minimapa ganha um ponto de destaque
+    this.minimapaLayer.addLayer(L.circleMarker(limitesCartao.getCenter(), { radius: 4, color: "#b91c1c", weight: 2, fillColor: "#ef4444", fillOpacity: 0.9, interactive: false }));
+    this.minimapa.invalidateSize();
+    this.minimapa.fitBounds(contexto, { padding: [6, 6] });
   },
 
   renderizarListaPrediosModal(t, pontosNumerados) {
@@ -630,6 +1194,8 @@ const MapaTerritorios = {
     }
     this.quadrasEdicao = null;
     this.territorioModalAtual = null;
+    this._modalEnquadradoPara = null;
+    this.limparLinkDireto("#t=");
     const modal = document.getElementById("modal-mapa-territorio");
     if (!modal) return;
     modal.classList.add("hidden");
@@ -640,19 +1206,119 @@ const MapaTerritorios = {
     this.abrirModalTerritorio(numero);
   },
 
-  obterCorStatus(t, naFilaTop5 = false) {
-    if (t.emMinhaPosse) {
-      return { borda: "#0b57d0", preenchimento: "#0b57d0" }; // Azul Google M3 (Em minha posse)
+  /** Remove da barra de endereços um link direto já atendido (#t=12 ou #cartao/12). */
+  limparLinkDireto(prefixo) {
+    try {
+      if (location.hash.startsWith(prefixo)) history.replaceState(null, "", location.pathname + location.search);
+    } catch (e) {}
+  },
+
+  /**
+   * ==========================================================================
+   * CARTÃO IMPRIMÍVEL (A5 paisagem): cartela, mapa com quadras numeradas e prédios, norte,
+   * escala, lista de prédios e QR com o link direto do cartão. Sai pelo diálogo de impressão
+   * do navegador (PDF vetorial em "Salvar como PDF").
+   * ==========================================================================
+   */
+  cartaoMap: null,
+  _rotulosCartao: [],
+
+  abrirCartaoImpressao(numero) {
+    const t = App.territorios.find(item => Number(item.numero) === Number(numero));
+    const geometria = this.obterGeometrias().itens.get(Number(numero));
+    const overlay = document.getElementById("cartao-impressao");
+    if (!t || !geometria || !overlay) {
+      Utils.mostrarToast("Geometria do mapa não disponível para este território.", "aviso");
+      return;
     }
-    if (t.statusReal === "OCUPADO") {
-      return { borda: "#b06000", preenchimento: "#f59e0b" }; // Âmbar (Ocupado)
+    const num = Number(t.numero);
+    const predios = Array.isArray(t.predios) ? t.predios : [];
+    const pontos = this.deslocarCoordenadasProximas(predios);
+
+    document.getElementById("cartao-titulo").textContent = `Território ${num}`;
+    document.getElementById("cartao-subtitulo").textContent = [t.bairro, t.tipo].filter(Boolean).join(" • ");
+    document.getElementById("cartao-data").textContent = `Emitido em ${new Date().toLocaleDateString("pt-BR")}`;
+
+    // QR com o link direto do cartão (abre o app, que exige login, já neste território)
+    const qrEl = document.getElementById("cartao-qr");
+    qrEl.innerHTML = "";
+    if (typeof qrcode === "function") {
+      try {
+        const qr = qrcode(0, "M");
+        qr.addData(`${location.origin}${location.pathname}#t=${num}`);
+        qr.make();
+        qrEl.innerHTML = qr.createSvgTag({ cellSize: 2, margin: 0, scalable: true });
+      } catch (e) {}
     }
-    if (t.statusReal === "RECENTE") {
-      return { borda: "#64748b", preenchimento: "#94a3b8" }; // Neutro (Recente <= 120d)
+
+    const listaEl = document.getElementById("cartao-predios");
+    listaEl.innerHTML = pontos.length
+      ? pontos.map(item => `
+          <li><span class="cartao-predio-num">${item.ordemPin}</span><span><strong>${Utils.escapeHtml(item.predio.nomeEdificio)}</strong><br>${Utils.escapeHtml(item.predio.endereco)}</span></li>`).join("")
+      : `<li class="cartao-sem-predios">Sem prédios cadastrados neste cartão.</li>`;
+
+    overlay.classList.remove("hidden");
+    document.body.classList.add("imprimindo-cartao");
+
+    if (this.cartaoMap) this.cartaoMap.remove();
+    const mapa = L.map("cartao-mapa", { zoomControl: false, zoomSnap: 0.25, center: geometria.limites.getCenter(), zoom: 16 });
+    this.cartaoMap = mapa;
+    this.criarPainesRotulos(mapa);
+    this.criarLadrilhosBase()["Ruas"].addTo(mapa);
+    L.control.scale({ imperial: false, maxWidth: 120, position: "bottomleft" }).addTo(mapa);
+    this.criarControleNorte().addTo(mapa);
+    mapa.attributionControl.setPrefix("Congregação Norte PB");
+
+    const rotulos = [];
+    const grupo = L.layerGroup().addTo(mapa);
+    this.desenharContextoTerritorio(grupo, t, geometria.partes, rotulos, { corMascara: "#ffffff", opacidadeMascara: 0.55 });
+    grupo.addLayer(L.polygon(geometria.partes, { fill: false, color: "#111827", weight: 3, lineJoin: "round", interactive: false }));
+
+    for (const item of pontos) {
+      if (!item.lat || !item.lng) continue;
+      grupo.addLayer(L.marker([item.lat, item.lng], {
+        interactive: false,
+        keyboard: false,
+        icon: L.divIcon({
+          className: "",
+          html: `<div class="predio-pin-marker pin-impressao">${item.ordemPin}</div>`,
+          iconSize: [22, 22],
+          iconAnchor: [11, 11]
+        })
+      }));
     }
-    if (naFilaTop5) {
-      return { borda: "#146c2e", preenchimento: "#16a34a" }; // Verde Destaque (Na Fila Top 5)
+
+    this._rotulosCartao = rotulos;
+    mapa.on("zoomend", () => this.atualizarRotulos(mapa, this._rotulosCartao));
+    this.carregarQuadrasGeo().then(() => {
+      if (this.cartaoMap !== mapa) return;
+      this.desenharQuadrasGeo(grupo, this._quadrasGeo.get(num) || [], rotulos);
+      // No cartão impresso todos os números de quadra aparecem
+      rotulos.forEach(r => { if (r.escala) r.sempre = true; });
+      this.atualizarRotulos(mapa, rotulos);
+    });
+
+    setTimeout(() => {
+      if (this.cartaoMap !== mapa) return;
+      mapa.invalidateSize();
+      mapa.fitBounds(geometria.limites, { padding: [14, 14] });
+      this.atualizarRotulos(mapa, rotulos);
+    }, 120);
+  },
+
+  fecharCartaoImpressao() {
+    const overlay = document.getElementById("cartao-impressao");
+    if (overlay) overlay.classList.add("hidden");
+    document.body.classList.remove("imprimindo-cartao");
+    if (this.cartaoMap) {
+      this.cartaoMap.remove();
+      this.cartaoMap = null;
     }
-    return { borda: "#475569", preenchimento: "#cbd5e1" };   // Disponível aguardando fila
+    this._rotulosCartao = [];
+    this.limparLinkDireto("#cartao/");
+  },
+
+  imprimirCartao() {
+    if (this.cartaoMap) window.print();
   }
 };

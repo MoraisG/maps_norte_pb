@@ -15,3 +15,9 @@ spec/
 
 client_secret*.json
 *.clasprc*
+
+# Cache local da malha viária do OSM (scripts/quadras/gerar-quadras.js)
+scripts/quadras/.cache/
+
+# Configuração local do modo de desenvolvimento (contém a chave de mapas da Esri)
+scripts/dev/config.local.json

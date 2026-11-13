@@ -8,7 +8,7 @@ const ctx = {
   Session: {}, SpreadsheetApp: {}, Logger: { log(){} }, console
 };
 vm.createContext(ctx);
-vm.runInContext(src + "\nthis.__t={sanitizarCelula,sanitizarLinha,compararSeguro,calcularNumerosElegiveisFila,consumirCota,usuarioPublico,CONFIG,PREDIOS_SEMENTE_NORTE};", ctx);
+vm.runInContext(src + "\nthis.__t={sanitizarCelula,sanitizarLinha,compararSeguro,calcularNumerosElegiveisFila,consumirCota,usuarioPublico,CONFIG,PREDIOS_SEMENTE_NORTE,configClienteAutenticado};", ctx);
 const t = ctx.__t;
 // F1
 assert.strictEqual(t.sanitizarCelula('=IMPORTXML("x")'), `'=IMPORTXML("x")`);
@@ -25,6 +25,12 @@ assert.ok(t.compararSeguro("abc","abc")); assert.ok(!t.compararSeguro("abc","abd
 let ok=0; for (let i=0;i<70;i++) if (t.consumirCota("T",60,60)) ok++; assert.strictEqual(ok,60);
 // F5
 assert.deepStrictEqual(Object.keys(t.usuarioPublico({id:1,nome:"a",email:"e",perfil:"P",status:"ATIVO",linhaPlanilha:9})).sort(), ["email","id","nome","perfil","status"]);
+// Chave de mapas: vem só da ScriptProperty (nunca do código) e vazia quando não configurada
+assert.deepStrictEqual(Object.keys(t.configClienteAutenticado()), ["chaveEsri"]);
+assert.strictEqual(t.configClienteAutenticado().chaveEsri, "");
+store.ESRI_API_KEY = "  AAPTteste  ";
+assert.strictEqual(t.configClienteAutenticado().chaveEsri, "AAPTteste");
+delete store.ESRI_API_KEY;
 // F7 fila
 const semente = new Set(t.PREDIOS_SEMENTE_NORTE.map(r=>String(r[1])));
 const lista = [];

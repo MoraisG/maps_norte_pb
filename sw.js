@@ -2,20 +2,23 @@
  * Service Worker — Estratégia Network-First Estrita (cache: "no-store")
  * Garante que o F5 sempre busque os arquivos mais recentes da rede, usando cache apenas se estiver sem internet.
  */
-const CACHE_NAME = "territorios-pwa-shell-v10";
+const CACHE_NAME = "territorios-pwa-shell-v13";
 const STATIC_ASSETS = [
   "./",
   "./index.html",
   "./manifest.json",
-  "./css/tailwind.css?v=10",
-  "./css/styles.css?v=10",
+  "./css/tailwind.css?v=13",
+  "./css/styles.css?v=13",
   "./vendor/leaflet-1.9.4/leaflet.css",
   "./vendor/leaflet-1.9.4/leaflet.js",
-  "./js/frame-guard.js?v=10",
-  "./js/utils.js?v=10",
-  "./js/api.js?v=10",
-  "./js/map.js?v=10",
-  "./js/app.js?v=10",
+  "./vendor/qrcode-generator-1.4.4/qrcode.js",
+  "./js/geo.js?v=13",
+  "./quadras.geojson?v=13",
+  "./js/frame-guard.js?v=13",
+  "./js/utils.js?v=13",
+  "./js/api.js?v=13",
+  "./js/map.js?v=13",
+  "./js/app.js?v=13",
   "./assets/icon.svg"
 ];
 
@@ -54,6 +57,12 @@ self.addEventListener("fetch", event => {
     url.hostname.includes("googleapis.com") ||
     url.hostname.includes("accounts.google.com")
   ) {
+    return;
+  }
+
+  // Ladrilhos dos mapas (CARTO, Esri) e demais recursos de outras origens seguem direto para a
+  // rede, com o cache HTTP normal do navegador: "no-store" faria baixar todo ladrilho de novo
+  if (url.origin !== self.location.origin) {
     return;
   }
 

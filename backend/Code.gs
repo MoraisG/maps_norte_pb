@@ -55,6 +55,15 @@ function lerPropriedade(chave, padrao) {
  * pelo Google Sheets. O prefixo ' força o armazenamento como texto puro (o
  * apóstrofo não aparece na célula nem retorna em getValues()).
  */
+/**
+ * Configuração entregue ao frontend SOMENTE depois do login (nunca em rota pública).
+ * chaveEsri: chave de API de mapas-base da Esri (ScriptProperty ESRI_API_KEY). Fica fora do
+ * repositório e do site público; é restrita por site e só tem o privilégio de mapas-base.
+ */
+function configClienteAutenticado() {
+  return { chaveEsri: String(lerPropriedade("ESRI_API_KEY", "") || "").trim() };
+}
+
 function sanitizarCelula(valor, tamanhoMax) {
   if (valor === null || valor === undefined) return "";
   if (typeof valor !== "string") return valor; // Date, number e boolean são seguros
@@ -328,6 +337,7 @@ function rotearRequisicao(metodo, queryParams, body) {
         return respostaJson({
           sucesso: true,
           usuario: usuarioPublico(usuario),
+          config: configClienteAutenticado(),
           territorios: listarTodosTerritoriosConsolidados(usuario)
         });
 
