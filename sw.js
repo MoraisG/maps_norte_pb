@@ -2,20 +2,20 @@
  * Service Worker — Estratégia Network-First Estrita (cache: "no-store")
  * Garante que o F5 sempre busque os arquivos mais recentes da rede, usando cache apenas se estiver sem internet.
  */
-const CACHE_NAME = "territorios-pwa-shell-v9";
+const CACHE_NAME = "territorios-pwa-shell-v10";
 const STATIC_ASSETS = [
   "./",
   "./index.html",
   "./manifest.json",
-  "./css/tailwind.css?v=9",
-  "./css/styles.css?v=9",
+  "./css/tailwind.css?v=10",
+  "./css/styles.css?v=10",
   "./vendor/leaflet-1.9.4/leaflet.css",
   "./vendor/leaflet-1.9.4/leaflet.js",
-  "./js/frame-guard.js?v=9",
-  "./js/utils.js?v=9",
-  "./js/api.js?v=9",
-  "./js/map.js?v=9",
-  "./js/app.js?v=9",
+  "./js/frame-guard.js?v=10",
+  "./js/utils.js?v=10",
+  "./js/api.js?v=10",
+  "./js/map.js?v=10",
+  "./js/app.js?v=10",
   "./assets/icon.svg"
 ];
 

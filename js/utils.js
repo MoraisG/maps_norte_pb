@@ -399,6 +399,9 @@ const ModalM3 = {
                 Se responder <strong>Sim</strong>, o território volta para a fila como concluído e fica indisponível até completar o ciclo de 120 dias.
               </p>
             </div>
+            <p class="text-[11px] text-[#444746] mt-3">
+              📍 Os alfinetes de quadras trabalhadas são apagados na devolução.${qtdPredios ? " 🏢 O histórico de prédios e apartamentos é mantido até que todos os prédios do cartão sejam concluídos." : ""}
+            </p>
             <div class="mt-6 flex flex-wrap items-center justify-end gap-2">
               <button type="button" id="m3-dev-cancel" class="px-4 py-2.5 rounded-full text-xs font-semibold text-[#444746] hover:bg-slate-100 transition mr-auto">
                 Cancelar

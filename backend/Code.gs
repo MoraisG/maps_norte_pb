@@ -343,6 +343,14 @@ function rotearRequisicao(metodo, queryParams, body) {
         if (metodo !== "POST") return erroMetodoNaoPermitido();
         return executarComLock(() => alternarPredioTrabalhadoTransacional(usuario, payload));
 
+      case "predios/marcar-apartamentos":
+        if (metodo !== "POST") return erroMetodoNaoPermitido();
+        return executarComLock(() => marcarApartamentosTransacional(usuario, payload));
+
+      case "quadras/salvar":
+        if (metodo !== "POST") return erroMetodoNaoPermitido();
+        return executarComLock(() => salvarQuadrasTrabalhadasTransacional(usuario, payload));
+
       // --- DOMÍNIO: MOVIMENTAÇÕES E RELATÓRIOS ---
       case "movimentacoes/minhas":
         return respostaJson({
@@ -877,7 +885,8 @@ function listarTodosTerritoriosConsolidados(usuarioSolicitante) {
       wkt: infoBase.wkt,
       ciclos: ciclosPublicos,
       predios: [],
-      totalPredios: 0
+      totalPredios: 0,
+      quadrasTrabalhadas: []
     });
   }
 
@@ -887,6 +896,13 @@ function listarTodosTerritoriosConsolidados(usuarioSolicitante) {
     const listaP = mapaPredios[String(resultado[i].numero)] || [];
     resultado[i].predios = listaP;
     resultado[i].totalPredios = listaP.length;
+  }
+
+  // Anexar os alfinetes de quadras já trabalhadas (só existem enquanto o cartão está em campo)
+  const mapaQuadras = carregarQuadrasPorTerritorio(ss);
+  for (let i = 0; i < resultado.length; i++) {
+    if (resultado[i].statusReal !== "OCUPADO") continue;
+    resultado[i].quadrasTrabalhadas = mapaQuadras[String(resultado[i].numero)] || [];
   }
 
   // Ordenação padrão por antiguidade (nunca trabalhados ou devolvidos há mais tempo primeiro)
@@ -1153,7 +1169,7 @@ function devolverTerritorioTransacional(usuario, payload) {
       sheetResp.getRange(linhaSolicitacaoAberta, 9).setValue("NAO_INICIADO");
     }
 
-    resetarPrediosDoTerritorio(ss, num);
+    encerrarProgressoNaDevolucao(ss, num);
     SpreadsheetApp.flush();
     atualizarUltimaAtividadeUsuario(usuario.email, `Devolveu T-${num} (Não Iniciado)`);
     registrarAuditoria("DEVOLVER_NAO_INICIADO", usuario.nome, usuario.email, num, "SUCESSO", "Retornou para a fila como DISPONÍVEL sem datas de início/conclusão");
@@ -1178,15 +1194,23 @@ function devolverTerritorioTransacional(usuario, payload) {
     tagFechada
   ], 200));
 
-  resetarPrediosDoTerritorio(ss, num);
+  const progresso = encerrarProgressoNaDevolucao(ss, num);
   SpreadsheetApp.flush();
   atualizarUltimaAtividadeUsuario(usuario.email, `Devolveu T-${num} (${tagFechada})`);
-  registrarAuditoria("DEVOLVER_TERRITORIO", usuario.nome, usuario.email, num, "SUCESSO", `Tag: ${tagFechada} | Devolvido por ${usuario.email}`);
+  registrarAuditoria("DEVOLVER_TERRITORIO", usuario.nome, usuario.email, num, "SUCESSO", `Tag: ${tagFechada} | Devolvido por ${usuario.email} | Prédios: ${progresso.prediosConcluidos}/${progresso.totalPredios}`);
+
+  let notaPredios = "";
+  if (progresso.totalPredios > 0) {
+    notaPredios = progresso.cicloPrediosCompleto
+      ? " Todos os prédios foram trabalhados: o histórico de prédios foi zerado para o próximo ciclo."
+      : ` O histórico de prédios/apartamentos foi mantido (${progresso.prediosConcluidos}/${progresso.totalPredios} prédios concluídos) para quem pegar o cartão em seguida.`;
+  }
 
   return respostaJson({
     sucesso: true,
     statusRetorno: "RECENTE",
-    mensagem: `Devolução do território ${num} (${territorio.bairro}) registrada como concluída! O cartão entrou no ciclo de descanso de ${CONFIG.DIAS_RECENTE} dias.`
+    cicloPrediosCompleto: progresso.cicloPrediosCompleto,
+    mensagem: `Devolução do território ${num} (${territorio.bairro}) registrada como concluída! O cartão entrou no ciclo de descanso de ${CONFIG.DIAS_RECENTE} dias.${notaPredios}`
   });
 }
 
@@ -1684,7 +1708,8 @@ function inicializarOuObterAbaPredios(ss) {
       "ReferenciaComercial",
       "Latitude",
       "Longitude",
-      "UltimaDataConclusao"
+      "UltimaDataConclusao",
+      "AptosTrabalhados"
     ]);
     if (PREDIOS_SEMENTE_NORTE.length > 0) {
       const linhasIniciais = PREDIOS_SEMENTE_NORTE.map(r => [
@@ -1733,7 +1758,8 @@ function carregarPrediosPorTerritorio(ss, territoriosAtivosSet) {
       latitude: Number(dados[i][9] || 0),
       longitude: Number(dados[i][10] || 0),
       ultimaDataConclusao: ultimaDataConclusao,
-      trabalhadoNesteCiclo: Boolean(ultimaDataConclusao)
+      trabalhadoNesteCiclo: Boolean(ultimaDataConclusao),
+      aptosTrabalhados: normalizarApartamentos(lerListaJson(dados[i][COL_PREDIO_APTOS - 1]))
     });
   }
 
@@ -1800,21 +1826,314 @@ function alternarPredioTrabalhadoTransacional(usuario, payload) {
   return respostaJson({ sucesso: false, codigo: 404, erro: "Prédio não encontrado na base da Congregação Norte." });
 }
 
-function resetarPrediosDoTerritorio(ss, numeroTerritorio) {
+/**
+ * Encerra o ciclo de prédios de um território na devolução.
+ * Regra: o histórico (prédios concluídos + apartamentos trabalhados) é PRESERVADO entre
+ * devoluções até que TODOS os prédios do cartão estejam concluídos. Só então o cartão é
+ * considerado completo em relação aos prédios e o histórico é zerado para o próximo ciclo.
+ */
+function encerrarCicloPrediosNaDevolucao(ss, numeroTerritorio) {
+  const resumo = { totalPredios: 0, prediosConcluidos: 0, cicloPrediosCompleto: false };
   try {
     const numAlvo = String(numeroTerritorio || "").trim().replace(/^0+/, "");
     const sheet = ss.getSheetByName("Predios");
-    if (!sheet) return;
+    if (!sheet) return resumo;
     const dados = sheet.getDataRange().getValues();
+    const linhas = [];
     for (let i = 1; i < dados.length; i++) {
+      if (!String(dados[i][0] || "").trim()) continue;
       const nLinha = String(dados[i][1] || "").trim().replace(/^0+/, "");
-      if (nLinha === numAlvo && dados[i][11]) {
-        sheet.getRange(i + 1, 12).setValue("");
+      if (nLinha !== numAlvo) continue;
+      linhas.push(i + 1);
+      resumo.totalPredios++;
+      if (dados[i][COL_PREDIO_CONCLUSAO - 1]) resumo.prediosConcluidos++;
+    }
+
+    resumo.cicloPrediosCompleto = resumo.totalPredios > 0 && resumo.prediosConcluidos === resumo.totalPredios;
+    if (resumo.cicloPrediosCompleto) {
+      const temColunaAptos = sheet.getLastColumn() >= COL_PREDIO_APTOS;
+      for (const linha of linhas) {
+        sheet.getRange(linha, COL_PREDIO_CONCLUSAO).setValue("");
+        if (temColunaAptos) sheet.getRange(linha, COL_PREDIO_APTOS).setValue("");
       }
     }
   } catch (e) {
-    Logger.log("Aviso ao resetar prédios do território: " + e.message);
+    Logger.log("Aviso ao encerrar ciclo de prédios do território: " + e.message);
   }
+  return resumo;
+}
+
+/**
+ * Efeitos da devolução sobre o progresso registrado pelo dirigente:
+ * - Alfinetes de quadras trabalhadas: sempre apagados.
+ * - Prédios/apartamentos: mantidos até todos os prédios do cartão serem concluídos.
+ */
+function encerrarProgressoNaDevolucao(ss, numeroTerritorio) {
+  limparQuadrasDoTerritorio(ss, numeroTerritorio);
+  return encerrarCicloPrediosNaDevolucao(ss, numeroTerritorio);
+}
+
+/**
+ * ============================================================================
+ * CAMADA 12: PROGRESSO DO CARTÃO EM CAMPO (QUADRAS E APARTAMENTOS TRABALHADOS)
+ * ============================================================================
+ * - Quadras: alfinetes (lat/lng) dentro dos limites do território, válidos só enquanto
+ *   o cartão está em posse. Uma linha por território na aba 'QuadrasTrabalhadas'.
+ * - Apartamentos: apenas o identificador da unidade (ex.: "101") já visitada, sem
+ *   qualquer dado de morador (LGPD). Coluna 'AptosTrabalhados' da aba 'Predios'.
+ */
+const COL_PREDIO_CONCLUSAO = 12;
+const COL_PREDIO_APTOS = 13;
+const LIMITE_PINOS_QUADRAS = 80;
+const LIMITE_APTOS_POR_PREDIO = 300;
+const ABA_QUADRAS = "QuadrasTrabalhadas";
+
+function lerListaJson(valor) {
+  if (valor === null || valor === undefined || valor === "") return [];
+  try {
+    const lista = JSON.parse(String(valor));
+    return Array.isArray(lista) ? lista : [];
+  } catch (e) {
+    return [];
+  }
+}
+
+/**
+ * Normaliza identificadores de apartamentos: texto curto alfanumérico (ex.: "101", "12B", "BL2-304"),
+ * em maiúsculas, sem duplicatas, em ordem natural. Itens inválidos são descartados.
+ */
+function normalizarApartamentos(listaRaw) {
+  if (!Array.isArray(listaRaw)) return [];
+  const vistos = {};
+  const saida = [];
+  for (const item of listaRaw) {
+    if (typeof item !== "string" && typeof item !== "number") continue;
+    const rotulo = String(item).toUpperCase().trim().replace(/\s+/g, " ");
+    if (!/^[A-Z0-9][A-Z0-9 \-]{0,9}$/.test(rotulo)) continue;
+    if (vistos[rotulo]) continue;
+    vistos[rotulo] = true;
+    saida.push(rotulo);
+    if (saida.length >= LIMITE_APTOS_POR_PREDIO) break;
+  }
+  return saida.sort((a, b) => a.localeCompare(b, "pt-BR", { numeric: true }));
+}
+
+/**
+ * Caixa delimitadora (com pequena margem) do polígono WKT do território ("lng lat" por vértice).
+ */
+function extrairLimitesWkt(wkt) {
+  const regex = /(-?\d+(?:\.\d+)?)\s+(-?\d+(?:\.\d+)?)/g;
+  const texto = String(wkt || "");
+  let m;
+  let minLat = Infinity, maxLat = -Infinity, minLng = Infinity, maxLng = -Infinity;
+  while ((m = regex.exec(texto)) !== null) {
+    const lng = Number(m[1]);
+    const lat = Number(m[2]);
+    if (!isFinite(lat) || !isFinite(lng) || Math.abs(lat) > 90 || Math.abs(lng) > 180) continue;
+    if (lat < minLat) minLat = lat;
+    if (lat > maxLat) maxLat = lat;
+    if (lng < minLng) minLng = lng;
+    if (lng > maxLng) maxLng = lng;
+  }
+  if (!isFinite(minLat) || !isFinite(minLng)) return null;
+  const margemLat = Math.max((maxLat - minLat) * 0.1, 0.0003);
+  const margemLng = Math.max((maxLng - minLng) * 0.1, 0.0003);
+  return {
+    minLat: minLat - margemLat,
+    maxLat: maxLat + margemLat,
+    minLng: minLng - margemLng,
+    maxLng: maxLng + margemLng
+  };
+}
+
+/**
+ * Valida e normaliza os alfinetes de quadras. Retorna null se a lista for inválida
+ * (formato incorreto, acima do limite ou algum ponto fora da área do território).
+ */
+function normalizarPinosQuadras(pinosRaw, limites) {
+  if (!Array.isArray(pinosRaw) || pinosRaw.length > LIMITE_PINOS_QUADRAS) return null;
+  const vistos = {};
+  const saida = [];
+  for (const p of pinosRaw) {
+    if (!p || typeof p !== "object") return null;
+    const lat = Number(p.lat);
+    const lng = Number(p.lng);
+    if (!isFinite(lat) || !isFinite(lng) || Math.abs(lat) > 90 || Math.abs(lng) > 180) return null;
+    if (limites && (lat < limites.minLat || lat > limites.maxLat || lng < limites.minLng || lng > limites.maxLng)) return null;
+    const latR = Math.round(lat * 1e6) / 1e6;
+    const lngR = Math.round(lng * 1e6) / 1e6;
+    const chave = latR + "_" + lngR;
+    if (vistos[chave]) continue;
+    vistos[chave] = true;
+    saida.push({ lat: latR, lng: lngR });
+  }
+  return saida;
+}
+
+function obterAbaQuadras(ss, criarSeAusente) {
+  let sheet = ss.getSheetByName(ABA_QUADRAS);
+  if (!sheet && criarSeAusente) {
+    sheet = ss.insertSheet(ABA_QUADRAS);
+    sheet.appendRow(["NumeroTerritorio", "PinosJson", "AtualizadoEm"]);
+  }
+  return sheet;
+}
+
+function carregarQuadrasPorTerritorio(ss) {
+  const porTerritorio = {};
+  const sheet = obterAbaQuadras(ss, false);
+  if (!sheet) return porTerritorio;
+  const dados = sheet.getDataRange().getValues();
+  for (let i = 1; i < dados.length; i++) {
+    const num = String(dados[i][0] || "").trim().replace(/^0+/, "");
+    if (!num) continue;
+    const pinos = [];
+    for (const par of lerListaJson(dados[i][1])) {
+      if (!Array.isArray(par)) continue;
+      const lat = Number(par[0]);
+      const lng = Number(par[1]);
+      if (isFinite(lat) && isFinite(lng)) pinos.push({ lat: lat, lng: lng });
+    }
+    if (pinos.length) porTerritorio[num] = pinos;
+  }
+  return porTerritorio;
+}
+
+function gravarQuadrasDoTerritorio(ss, numeroTerritorio, pinos) {
+  const numAlvo = String(numeroTerritorio || "").trim().replace(/^0+/, "");
+  const sheet = obterAbaQuadras(ss, pinos.length > 0);
+  if (!sheet) return;
+  const json = JSON.stringify(pinos.map(p => [p.lat, p.lng]));
+  const dados = sheet.getDataRange().getValues();
+  for (let i = 1; i < dados.length; i++) {
+    if (String(dados[i][0] || "").trim().replace(/^0+/, "") === numAlvo) {
+      sheet.getRange(i + 1, 2, 1, 2).setValues([[json, new Date()]]);
+      return;
+    }
+  }
+  if (pinos.length > 0) sheet.appendRow([Number(numAlvo), json, new Date()]);
+}
+
+function limparQuadrasDoTerritorio(ss, numeroTerritorio) {
+  try {
+    gravarQuadrasDoTerritorio(ss, numeroTerritorio, []);
+  } catch (e) {
+    Logger.log("Aviso ao limpar quadras do território: " + e.message);
+  }
+}
+
+/**
+ * Localiza o território e confirma que o usuário pode registrar progresso nele
+ * (dirigente com o cartão em mãos ou Administrador). Retorna { territorio } ou { erro }.
+ */
+function validarPosseParaProgresso(usuario, numTerr) {
+  const todos = listarTodosTerritoriosConsolidados(usuario);
+  const territorio = todos.find(t => String(t.numero) === numTerr);
+  if (!territorio) {
+    return { erro: respostaJson({ sucesso: false, codigo: 404, erro: "Território não encontrado." }) };
+  }
+  if (territorio.statusReal !== "OCUPADO" || (usuario.perfil !== "ADMIN" && !territorio.emMinhaPosse)) {
+    return {
+      erro: respostaJson({
+        sucesso: false,
+        codigo: 403,
+        erro: "Apenas o dirigente que está com o território em mãos (ou um Administrador) pode registrar o que já foi trabalhado."
+      })
+    };
+  }
+  return { territorio: territorio };
+}
+
+function salvarQuadrasTrabalhadasTransacional(usuario, payload) {
+  const numTerr = String((payload && payload.numeroTerritorio) || "").trim().replace(/^0+/, "");
+  if (!numTerr || isNaN(Number(numTerr))) {
+    return respostaJson({ sucesso: false, codigo: 400, erro: "Número de território inválido." });
+  }
+
+  const validacao = validarPosseParaProgresso(usuario, numTerr);
+  if (validacao.erro) return validacao.erro;
+
+  const limites = extrairLimitesWkt(validacao.territorio.wkt);
+  if (!limites) {
+    return respostaJson({ sucesso: false, codigo: 409, erro: "Este território não possui mapa cadastrado para marcar quadras." });
+  }
+
+  const pinos = normalizarPinosQuadras(payload && payload.pinos, limites);
+  if (!pinos) {
+    return respostaJson({
+      sucesso: false,
+      codigo: 400,
+      erro: `Alfinetes inválidos: marque no máximo ${LIMITE_PINOS_QUADRAS} pontos, todos dentro da área do território.`
+    });
+  }
+
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  gravarQuadrasDoTerritorio(ss, numTerr, pinos);
+  SpreadsheetApp.flush();
+  registrarAuditoria("QUADRAS_TRABALHADAS", usuario.nome, usuario.email, numTerr, "SUCESSO", `${pinos.length} alfinete(s)`);
+
+  return respostaJson({
+    sucesso: true,
+    numeroTerritorio: Number(numTerr),
+    quadrasTrabalhadas: pinos,
+    mensagem: pinos.length
+      ? `${pinos.length} quadra(s) marcada(s) como trabalhada(s) no Território ${numTerr}.`
+      : `Marcações de quadras do Território ${numTerr} removidas.`
+  });
+}
+
+function marcarApartamentosTransacional(usuario, payload) {
+  const idPredio = String((payload && payload.idPredio) || "").trim();
+  const numTerr = String((payload && payload.numeroTerritorio) || "").trim().replace(/^0+/, "");
+  if (!idPredio || !numTerr) {
+    return respostaJson({ sucesso: false, codigo: 400, erro: "Identificador do prédio e território são obrigatórios." });
+  }
+  if (!payload || !Array.isArray(payload.apartamentos) || payload.apartamentos.length > LIMITE_APTOS_POR_PREDIO) {
+    return respostaJson({ sucesso: false, codigo: 400, erro: "Lista de apartamentos inválida." });
+  }
+
+  const aptos = normalizarApartamentos(payload.apartamentos);
+  if (aptos.length !== payload.apartamentos.length) {
+    return respostaJson({
+      sucesso: false,
+      codigo: 400,
+      erro: "Informe apenas o número/identificação de cada apartamento (até 10 letras ou números, ex.: 101, 12B), sem repetir."
+    });
+  }
+
+  const validacao = validarPosseParaProgresso(usuario, numTerr);
+  if (validacao.erro) return validacao.erro;
+
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheet = inicializarOuObterAbaPredios(ss);
+  const dados = sheet.getDataRange().getValues();
+
+  for (let i = 1; i < dados.length; i++) {
+    if (String(dados[i][0] || "").trim() !== idPredio) continue;
+
+    const numTerrPredio = String(dados[i][1] || "").trim().replace(/^0+/, "");
+    if (numTerrPredio !== numTerr) {
+      registrarAuditoria("PREDIO_TERRITORIO_DIVERGENTE", usuario.nome, usuario.email, numTerr, "NEGADO", `${idPredio} pertence ao T-${numTerrPredio}`);
+      return respostaJson({ sucesso: false, codigo: 403, erro: "Este prédio não pertence ao território informado." });
+    }
+
+    if (!String(sheet.getRange(1, COL_PREDIO_APTOS).getValue() || "").trim()) {
+      sheet.getRange(1, COL_PREDIO_APTOS).setValue("AptosTrabalhados");
+    }
+    sheet.getRange(i + 1, COL_PREDIO_APTOS).setValue(aptos.length ? JSON.stringify(aptos) : "");
+    SpreadsheetApp.flush();
+    registrarAuditoria("APTOS_TRABALHADOS", usuario.nome, usuario.email, numTerr, "SUCESSO", `${idPredio}: ${aptos.length} apto(s)`);
+
+    return respostaJson({
+      sucesso: true,
+      idPredio: idPredio,
+      numeroTerritorio: Number(numTerr),
+      aptosTrabalhados: aptos,
+      mensagem: `${aptos.length} apartamento(s) registrado(s) como trabalhado(s) neste prédio.`
+    });
+  }
+
+  return respostaJson({ sucesso: false, codigo: 404, erro: "Prédio não encontrado na base da Congregação Norte." });
 }
 
 const PREDIOS_SEMENTE_NORTE = [

@@ -317,6 +317,7 @@ const App = {
       if (!Array.isArray(copia.predios) || copia.predios.length === 0) {
         copia.predios = Utils.obterPrediosPadraoTerritorio(copia.numero);
       }
+      if (!Array.isArray(copia.quadrasTrabalhadas)) copia.quadrasTrabalhadas = [];
       if (copia.statusReal !== "OCUPADO") {
         const dias = Utils.calcularDiasDesdeData(copia.ultimaData);
         copia.diasDesdeDevolucao = dias;
@@ -525,11 +526,12 @@ const App = {
       const itensHtml = amostra.map((p, idx) => {
         const { interfoneBadge } = Utils.obterBadgesPredio(p);
         const concluido = Boolean(p.trabalhadoNesteCiclo || p.ultimaDataConclusao);
+        const qtdAptos = Array.isArray(p.aptosTrabalhados) ? p.aptosTrabalhados.length : 0;
         return `
           <div class="flex items-start justify-between gap-2 py-1.5 ${idx > 0 ? "border-t border-slate-200/70" : ""}">
             <div class="min-w-0">
               <p class="text-[11px] font-bold text-slate-800 truncate">${concluido ? "✓ " : ""}${idx + 1}. ${Utils.escapeHtml(p.nomeEdificio)}</p>
-              <p class="text-[10px] text-slate-600 truncate">${Utils.escapeHtml(p.endereco)}</p>
+              <p class="text-[10px] text-slate-600 truncate">${Utils.escapeHtml(p.endereco)}${qtdAptos ? ` • 🚪 ${qtdAptos} apto(s) já trabalhado(s)` : ""}</p>
             </div>
             <span class="px-1.5 py-0.5 text-[9px] font-semibold rounded-full shrink-0 ${interfoneBadge.cls}">${interfoneBadge.texto}</span>
           </div>
@@ -560,6 +562,19 @@ const App = {
         <div class="mt-3 px-3 py-2 rounded-xl bg-slate-50/70 border border-slate-200/60 flex items-center justify-between gap-2">
           <span class="text-[11px] text-slate-500">🏡 Sem prédios verticais neste cartão</span>
           ${naFila5 ? `<button type="button" data-acao="filtrar-fila-predios" class="text-[11px] font-semibold text-[#0b57d0] hover:underline shrink-0">Ver fila com prédios →</button>` : ""}
+        </div>`;
+    }
+
+    // Progresso em campo: quadras marcadas com alfinete no mapa (apagadas na devolução)
+    let infoQuadras = "";
+    if (t.wkt && MapaTerritorios.podeEditarQuadras(t)) {
+      const qtdQuadras = Array.isArray(t.quadrasTrabalhadas) ? t.quadrasTrabalhadas.length : 0;
+      infoQuadras = `
+        <div class="mt-2 px-3 py-2 rounded-xl bg-[#f4f8ff] border border-[#d3e3fd] flex items-center justify-between gap-2">
+          <span class="text-[11px] text-slate-700">📍 ${qtdQuadras ? `<strong>${qtdQuadras}</strong> quadra(s) trabalhada(s)` : "Nenhuma quadra marcada"}</span>
+          <button type="button" data-acao="marcar-quadras" data-num="${num}" class="text-[11px] font-bold text-[#0b57d0] hover:underline shrink-0">
+            ${qtdQuadras ? "Editar no mapa →" : "Marcar no mapa →"}
+          </button>
         </div>`;
     }
 
@@ -619,6 +634,7 @@ const App = {
           </div>
           ${infoPosse}
           ${infoPredios}
+          ${infoQuadras}
         </div>
         <div class="mt-4 pt-3 border-t border-slate-100 flex items-center gap-2">
           ${areaAcoes}
@@ -774,6 +790,133 @@ const App = {
       Utils.mostrarToast(res.mensagem, "sucesso");
     } catch (err) {
       Utils.mostrarToast(err.message, "erro");
+    }
+  },
+
+  /**
+   * Converte o texto digitado ("101, 102 201") em identificadores de apartamento válidos
+   */
+  interpretarApartamentosDigitados(texto) {
+    const validos = [];
+    const invalidos = [];
+    for (const parte of String(texto || "").split(/[,;\n]+|\s+/)) {
+      const rotulo = parte.toUpperCase().trim();
+      if (!rotulo) continue;
+      if (/^[A-Z0-9][A-Z0-9\-]{0,9}$/.test(rotulo)) validos.push(rotulo);
+      else invalidos.push(parte.trim());
+    }
+    return { validos, invalidos };
+  },
+
+  async salvarApartamentosPredio(idPredio, numeroTerritorio, novaLista) {
+    try {
+      const res = await ApiClient.request("predios/marcar-apartamentos", {
+        idPredio,
+        numeroTerritorio: Number(numeroTerritorio),
+        apartamentos: novaLista
+      });
+
+      const t = this.territorios.find(item => Number(item.numero) === Number(numeroTerritorio));
+      const p = t && Array.isArray(t.predios) ? t.predios.find(item => item.idPredio === idPredio) : null;
+      if (p) p.aptosTrabalhados = Array.isArray(res.aptosTrabalhados) ? res.aptosTrabalhados : [];
+
+      this.renderizarCardsTerritorios();
+      this.renderizarMeusTerritorios();
+      if (MapaTerritorios.territorioModalAtual === Number(numeroTerritorio)) {
+        MapaTerritorios.atualizarListaPrediosModal(idPredio);
+      }
+      return true;
+    } catch (err) {
+      Utils.mostrarToast(err.message, "erro");
+      return false;
+    }
+  },
+
+  /**
+   * Registra apartamentos já trabalhados de um prédio (apenas o número da unidade, sem dados de moradores).
+   * O histórico é mantido entre devoluções até que todos os prédios do cartão sejam concluídos.
+   */
+  async acaoAdicionarApartamentos(idPredio, numeroTerritorio) {
+    const campo = Array.from(document.querySelectorAll("#modal-predios-lista input[data-apto-input]"))
+      .find(el => el.dataset.aptoInput === idPredio);
+    if (!campo || campo.disabled) return;
+
+    const { validos, invalidos } = this.interpretarApartamentosDigitados(campo.value);
+    if (invalidos.length) {
+      Utils.mostrarToast(`Identificação inválida: ${invalidos.slice(0, 3).join(", ")}. Use até 10 letras/números por apartamento (ex.: 101, 12B).`, "aviso");
+      return;
+    }
+    if (!validos.length) {
+      Utils.mostrarToast("Digite o número de um ou mais apartamentos (ex.: 101, 102).", "aviso");
+      campo.focus();
+      return;
+    }
+
+    const t = this.territorios.find(item => Number(item.numero) === Number(numeroTerritorio));
+    const p = t && Array.isArray(t.predios) ? t.predios.find(item => item.idPredio === idPredio) : null;
+    if (!p) return;
+
+    const atuais = Array.isArray(p.aptosTrabalhados) ? p.aptosTrabalhados : [];
+    const novaLista = Array.from(new Set([...atuais, ...validos]));
+    if (novaLista.length === atuais.length) {
+      Utils.mostrarToast("Esses apartamentos já estavam registrados.", "aviso");
+      campo.value = "";
+      return;
+    }
+
+    campo.disabled = true;
+    const ok = await this.salvarApartamentosPredio(idPredio, numeroTerritorio, novaLista);
+    if (ok) {
+      Utils.mostrarToast(`${novaLista.length - atuais.length} apartamento(s) registrado(s) como trabalhado(s).`, "sucesso");
+    } else {
+      campo.disabled = false;
+    }
+  },
+
+  async acaoRemoverApartamento(idPredio, numeroTerritorio, apto) {
+    const t = this.territorios.find(item => Number(item.numero) === Number(numeroTerritorio));
+    const p = t && Array.isArray(t.predios) ? t.predios.find(item => item.idPredio === idPredio) : null;
+    if (!p || !Array.isArray(p.aptosTrabalhados)) return;
+    const novaLista = p.aptosTrabalhados.filter(a => a !== apto);
+    if (novaLista.length === p.aptosTrabalhados.length) return;
+    const ok = await this.salvarApartamentosPredio(idPredio, numeroTerritorio, novaLista);
+    if (ok) Utils.mostrarToast(`Apartamento ${apto} removido da lista.`, "sucesso");
+  },
+
+  /**
+   * Abre o mapa do cartão já no modo de marcar quadras trabalhadas
+   */
+  acaoMarcarQuadras(numero) {
+    MapaTerritorios.abrirModalTerritorio(Number(numero));
+    if (MapaTerritorios.territorioModalAtual === Number(numero) && !MapaTerritorios.quadrasEdicao) {
+      MapaTerritorios.iniciarEdicaoQuadras();
+    }
+  },
+
+  /**
+   * Salva os alfinetes de quadras trabalhadas do cartão em edição (substitui o conjunto anterior)
+   */
+  async acaoSalvarQuadras() {
+    const edicao = MapaTerritorios.quadrasEdicao;
+    if (!edicao || this._salvandoQuadras) return;
+    this._salvandoQuadras = true;
+    try {
+      const res = await ApiClient.request("quadras/salvar", {
+        numeroTerritorio: edicao.numero,
+        pinos: edicao.pinos
+      });
+      const t = this.territorios.find(item => Number(item.numero) === edicao.numero);
+      if (t) t.quadrasTrabalhadas = Array.isArray(res.quadrasTrabalhadas) ? res.quadrasTrabalhadas : [];
+
+      if (MapaTerritorios.quadrasEdicao === edicao) MapaTerritorios.quadrasEdicao = null;
+      MapaTerritorios.renderizarQuadrasModal();
+      this.renderizarCardsTerritorios();
+      this.renderizarMeusTerritorios();
+      Utils.mostrarToast(res.mensagem, "sucesso");
+    } catch (err) {
+      Utils.mostrarToast(err.message, "erro");
+    } finally {
+      this._salvandoQuadras = false;
     }
   },
 
@@ -1360,13 +1503,22 @@ const ACOES_UI = {
   "editar-usuario": el => App.preencherFormUsuario(Number(el.dataset.idx)),
   "filtrar-dirigente": el => App.filtrarDashboardPorDirigente(el.dataset.dirigente || ""),
   "alternar-predio": el => App.acaoAlternarPredioTrabalhado(el.dataset.idPredio, Number(el.dataset.num), el.dataset.trabalhado === "true"),
-  "focar-predio": el => MapaTerritorios.focarPredioNoModal(el.dataset.idPredio)
+  "focar-predio": el => MapaTerritorios.focarPredioNoModal(el.dataset.idPredio),
+  "adicionar-aptos": el => App.acaoAdicionarApartamentos(el.dataset.idPredio, Number(el.dataset.num)),
+  "remover-apto": el => App.acaoRemoverApartamento(el.dataset.idPredio, Number(el.dataset.num), el.dataset.apto),
+  "marcar-quadras": el => App.acaoMarcarQuadras(Number(el.dataset.num)),
+  "quadras-editar": () => MapaTerritorios.iniciarEdicaoQuadras(),
+  "quadras-cancelar": () => MapaTerritorios.cancelarEdicaoQuadras(),
+  "quadras-limpar": () => MapaTerritorios.limparEdicaoQuadras(),
+  "quadras-salvar": () => App.acaoSalvarQuadras()
 };
 
 document.addEventListener("click", (evento) => {
   const alvo = evento.target instanceof Element ? evento.target.closest("[data-acao]") : null;
   if (!alvo || alvo.disabled) return;
   const acao = ACOES_UI[alvo.dataset.acao];
+  // Sem ação registrada (ex.: data-acao="bloco-aptos"): o clique segue o comportamento padrão,
+  // sem subir para o data-acao de um elemento ancestral
   if (!acao) return;
   // Só o elemento mais interno com data-acao é executado (equivale ao antigo stopPropagation)
   evento.preventDefault();
