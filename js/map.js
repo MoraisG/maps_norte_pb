@@ -33,7 +33,7 @@ const MapaTerritorios = {
   CHAVE_ESRI: "",
   FALHAS_SATELITE_PARA_DESISTIR: 4,
   ZOOM_MIN_DETALHES: 15,          // quadras numeradas e pinos de prédios só a partir deste zoom
-  VERSAO_QUADRAS_GEO: 18,         // manter igual à VERSAO de sw.js
+  VERSAO_QUADRAS_GEO: 19,         // manter igual à VERSAO de sw.js
   _localizacao: new Map(),        // mapa -> estado do "minha posição" (GPS)
   _mapasComCamadas: [],           // [{ map, camadas }] para sincronizar a preferência entre os mapas
   rotulosLayerGroup: null,
