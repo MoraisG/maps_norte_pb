@@ -6,11 +6,13 @@
   <meta name="theme-color" content="#ffffff" />
   <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://accounts.google.com/gsi/client; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://accounts.google.com/gsi/style; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: https://tile.openstreetmap.org https://server.arcgisonline.com https://ibasemaps-api.arcgis.com https://static-map-tiles-api.arcgis.com https://*.googleusercontent.com; connect-src 'self' https://script.google.com https://script.googleusercontent.com https://accounts.google.com/gsi/; frame-src https://accounts.google.com/gsi/; worker-src 'self'; manifest-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; upgrade-insecure-requests;" />
   <meta name="referrer" content="strict-origin-when-cross-origin" />
-  <script src="js/frame-guard.js?v=13"></script>
+  <script src="js/frame-guard.js?v=15"></script>
   <title>Territórios Norte PB — Gestão e Mapas</title>
   <link rel="manifest" href="manifest.json" />
   <link rel="icon" type="image/svg+xml" href="assets/icon.svg" />
-  <link rel="apple-touch-icon" href="assets/icon.svg" />
+  <link rel="apple-touch-icon" href="assets/apple-touch-icon.png" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-title" content="Territórios" />
 
   <!-- Google Fonts (Inter / Google Sans style) -->
   <link rel="preconnect" href="https://fonts.googleapis.com" />
@@ -18,14 +20,14 @@
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
 
   <!-- Tailwind CSS (compilado localmente) & Leaflet GIS (hospedado no próprio site) -->
-  <link rel="stylesheet" href="css/tailwind.css?v=13" />
+  <link rel="stylesheet" href="css/tailwind.css?v=15" />
   <link rel="stylesheet" href="vendor/leaflet-1.9.4/leaflet.css" />
   <script src="vendor/leaflet-1.9.4/leaflet.js"></script>
   <script src="vendor/qrcode-generator-1.4.4/qrcode.js"></script>
 
   <!-- Google Identity Services (OAuth2 / OIDC Real) -->
   <script src="https://accounts.google.com/gsi/client" async defer></script>
-  <link rel="stylesheet" href="css/styles.css?v=13" />
+  <link rel="stylesheet" href="css/styles.css?v=15" />
   <!-- Hachura dos territórios ocupados (precisa estar no documento para achar o <pattern> do fim da página) -->
   <style>
     path.poligono-hachura-ocupado { fill: url(#padrao-hachura-ocupado); fill-opacity: 1; }
@@ -61,7 +63,8 @@
       <!-- Botão Oficial Google Identity -->
       <div class="mt-7 flex flex-col items-center justify-center min-h-[52px]">
         <div id="google-btn-container" class="flex justify-center"></div>
-        <p id="login-loading" class="hidden text-xs text-[#0b57d0] font-medium mt-3 animate-pulse">
+        <p id="login-loading" role="status" class="hidden text-xs text-[#0b57d0] font-medium mt-3 animate-pulse">
+          <span class="giro-ocupado" aria-hidden="true"></span>
           Validando identidade Google e permissões...
         </p>
       </div>
@@ -125,6 +128,13 @@
         </button>
       </nav>
     </header>
+
+    <!-- Convite para instalar o app (js/instalacao.js); some depois de instalado ou dispensado -->
+    <div id="faixa-instalar" class="faixa-instalar" hidden>
+      <p>Instale o app para abrir mais rápido, direto da tela de início.</p>
+      <button id="btn-instalar" type="button" class="faixa-instalar-acao">Instalar</button>
+      <button id="btn-dispensar-instalar" type="button" class="faixa-instalar-fechar" title="Agora não" aria-label="Dispensar o convite de instalação">✕</button>
+    </div>
 
     <!-- Conteúdo Principal -->
     <main class="flex-1 max-w-7xl w-full mx-auto p-4 space-y-4">
@@ -571,6 +581,12 @@
     </div>
   </div>
 
+  <!-- Aviso de nova versão publicada (exibido por App.mostrarAvisoNovaVersao) -->
+  <div id="aviso-nova-versao" class="aviso-nova-versao" role="status" hidden>
+    <span>Nova versão disponível.</span>
+    <button id="btn-atualizar-versao" type="button">Atualizar</button>
+  </div>
+
   <!-- Padrão de hachura dos territórios ocupados (referenciado por css/styles.css) -->
   <svg class="svg-padroes" width="0" height="0" aria-hidden="true" focusable="false">
     <defs>
@@ -582,10 +598,11 @@
   </svg>
 
   <!-- Scripts Modulares da Aplicação -->
-  <script src="js/geo.js?v=13"></script>
-  <script src="js/utils.js?v=13"></script>
-  <script src="js/api.js?v=13"></script>
-  <script src="js/map.js?v=13"></script>
-  <script src="js/app.js?v=13"></script>
+  <script src="js/geo.js?v=15"></script>
+  <script src="js/utils.js?v=15"></script>
+  <script src="js/api.js?v=15"></script>
+  <script src="js/map.js?v=15"></script>
+  <script src="js/instalacao.js?v=15"></script>
+  <script src="js/app.js?v=15"></script>
 </body>
 </html>
