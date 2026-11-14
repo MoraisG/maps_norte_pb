@@ -334,12 +334,7 @@ function rotearRequisicao(metodo, queryParams, body) {
 
       // --- DOMÍNIO: TERRITÓRIOS (PUBLICADOR + ADMIN) ---
       case "territorios/listar":
-        return respostaJson({
-          sucesso: true,
-          usuario: usuarioPublico(usuario),
-          config: configClienteAutenticado(),
-          territorios: listarTodosTerritoriosConsolidados(usuario)
-        });
+        return responderListagemTerritorios(usuario, payload);
 
       case "territorios/solicitar":
         if (metodo !== "POST") return erroMetodoNaoPermitido();
@@ -351,15 +346,15 @@ function rotearRequisicao(metodo, queryParams, body) {
 
       case "predios/marcar-trabalhado":
         if (metodo !== "POST") return erroMetodoNaoPermitido();
-        return executarComLock(() => alternarPredioTrabalhadoTransacional(usuario, payload));
+        return executarComLock(() => alternarPredioTrabalhadoTransacional(usuario, payload), ["PROG"]);
 
       case "predios/marcar-apartamentos":
         if (metodo !== "POST") return erroMetodoNaoPermitido();
-        return executarComLock(() => marcarApartamentosTransacional(usuario, payload));
+        return executarComLock(() => marcarApartamentosTransacional(usuario, payload), ["PROG"]);
 
       case "quadras/salvar":
         if (metodo !== "POST") return erroMetodoNaoPermitido();
-        return executarComLock(() => salvarQuadrasTrabalhadasTransacional(usuario, payload));
+        return executarComLock(() => salvarQuadrasTrabalhadasTransacional(usuario, payload), ["PROG"]);
 
       // --- DOMÍNIO: MOVIMENTAÇÕES E RELATÓRIOS ---
       case "movimentacoes/minhas":
@@ -393,7 +388,7 @@ function rotearRequisicao(metodo, queryParams, body) {
       case "admin/usuarios/salvar":
         if (metodo !== "POST") return erroMetodoNaoPermitido();
         exigirPerfilAdmin(usuario, rota);
-        return executarComLock(() => salvarOuAlterarUsuarioAdmin(usuario, payload.dadosUsuario));
+        return executarComLock(() => salvarOuAlterarUsuarioAdmin(usuario, payload.dadosUsuario), []);
 
       case "admin/auditoria":
         exigirPerfilAdmin(usuario, rota);
@@ -695,7 +690,214 @@ function atualizarUltimaAtividadeUsuario(email, descricaoAtividade) {
  * CAMADA 5: LEITURA E REGRAS DE NEGÓCIO DOS 94 TERRITÓRIOS + GEOMETRIA MAPA
  * ============================================================================
  */
-function listarTodosTerritoriosConsolidados(usuarioSolicitante) {
+/**
+ * ============================================================================
+ * LISTAGEM CONSOLIDADA COM CACHE (Spec 06, fase 2)
+ * ============================================================================
+ * A listagem é montada em três etapas:
+ *   1. BASE      — abas BASE, DASHBOARD e Respostas -> situação de cada território, igual para todos
+ *                  os usuários (guarda campos internos "_..." que NUNCA saem na resposta).
+ *   2. PROGRESSO — abas Predios e QuadrasTrabalhadas (o que já foi trabalhado em campo).
+ *   3. PROJEÇÃO  — aplica as regras de visibilidade por usuário (LGPD/RBAC) sobre 1 + 2.
+ * As etapas 1 e 2 ficam no CacheService (em partes, por causa do limite de 100 KB por chave) e são
+ * invalidadas por toda escrita feita pela API (executarComLock) e por edição manual (onEdit).
+ * Solicitar e devolver decidem SEMPRE sobre leitura nova da planilha ({ fresco: true }).
+ */
+const CACHE_LISTAGEM = {
+  PREFIXO: "LST1_",
+  TAMANHO_PARTE: 45000,      // caracteres por chave (folga para acentos em UTF-8 dentro dos 100 KB)
+  TTL_PADRAO_SECONDS: 600,   // rede de segurança para alterações que não passam pela API nem pelo onEdit
+  TTL_GERACAO_SECONDS: 21600,
+  GRUPOS: ["BASE", "PROG"]
+};
+
+/** Validade do cache da listagem. ScriptProperty CACHE_LISTAGEM_TTL_SECONDS = 0 desliga o cache. */
+function ttlCacheListagem() {
+  const v = Number(lerPropriedade("CACHE_LISTAGEM_TTL_SECONDS", CACHE_LISTAGEM.TTL_PADRAO_SECONDS));
+  if (!isFinite(v) || v <= 0) return 0;
+  return Math.min(Math.floor(v), 21600);
+}
+
+/** Resumo curto e estável de um texto (cyrb53): identifica a versão do conteúdo, não é criptográfico. */
+function resumirConteudo(texto) {
+  const str = String(texto);
+  let h1 = 0xdeadbeef, h2 = 0x41c6ce57;
+  for (let i = 0; i < str.length; i++) {
+    const ch = str.charCodeAt(i);
+    h1 = Math.imul(h1 ^ ch, 2654435761);
+    h2 = Math.imul(h2 ^ ch, 1597334677);
+  }
+  h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
+  h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
+  return (4294967296 * (2097151 & h2) + (h1 >>> 0)).toString(36) + "-" + str.length.toString(36);
+}
+
+function cacheLerVarios(cache, chaves) {
+  if (typeof cache.getAll === "function") return cache.getAll(chaves) || {};
+  const achados = {};
+  for (const chave of chaves) {
+    const v = cache.get(chave);
+    if (v !== null && v !== undefined) achados[chave] = v;
+  }
+  return achados;
+}
+
+function inicioDoDiaMs() {
+  const agora = new Date();
+  return new Date(agora.getFullYear(), agora.getMonth(), agora.getDate()).getTime();
+}
+
+/**
+ * "Geração" de um grupo: muda a cada invalidação. Uma cópia só vale se foi gravada na geração
+ * atual — assim, uma leitura que começou antes de uma escrita não deixa dado antigo no cache.
+ */
+function lerGeracaoListagem(grupo) {
+  try {
+    return String(CacheService.getScriptCache().get(CACHE_LISTAGEM.PREFIXO + grupo + "_GER") || "");
+  } catch (e) {
+    return "";
+  }
+}
+
+/** Invalida os grupos informados (padrão: todos). Chamada por toda escrita e pelo onEdit. */
+function invalidarCacheListagem(grupos) {
+  const lista = Array.isArray(grupos) ? grupos : CACHE_LISTAGEM.GRUPOS;
+  try {
+    const cache = CacheService.getScriptCache();
+    for (const grupo of lista) {
+      cache.put(
+        CACHE_LISTAGEM.PREFIXO + grupo + "_GER",
+        Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 10),
+        CACHE_LISTAGEM.TTL_GERACAO_SECONDS
+      );
+    }
+  } catch (e) {
+    // Cache é otimização: falha aqui não pode derrubar a operação de escrita
+  }
+}
+
+/** Lê só o "cabeçalho" da cópia (versão, dia, geração) e confere se ainda vale. */
+function lerMetaListagem(grupo) {
+  if (!ttlCacheListagem()) return null;
+  try {
+    const prefixo = CACHE_LISTAGEM.PREFIXO + grupo;
+    const achados = cacheLerVarios(CacheService.getScriptCache(), [prefixo + "_META", prefixo + "_GER"]);
+    if (!achados[prefixo + "_META"]) return null;
+    const meta = JSON.parse(achados[prefixo + "_META"]);
+    if (!meta || meta.ger !== String(achados[prefixo + "_GER"] || "")) return null;
+    if (meta.dia !== inicioDoDiaMs()) return null;   // RECENTE x DISPONÍVEL depende da data de hoje
+    return meta;
+  } catch (e) {
+    return null;
+  }
+}
+
+function lerConsolidacaoEmCache(grupo) {
+  const meta = lerMetaListagem(grupo);
+  if (!meta) return null;
+  try {
+    const chaves = [];
+    for (let i = 0; i < meta.partes; i++) chaves.push(CACHE_LISTAGEM.PREFIXO + grupo + "_" + meta.id + "_" + i);
+    const achados = cacheLerVarios(CacheService.getScriptCache(), chaves);
+    let texto = "";
+    for (const chave of chaves) {
+      if (typeof achados[chave] !== "string") return null;   // parte expirada/removida: reconstrói
+      texto += achados[chave];
+    }
+    if (texto.length !== meta.tamanho) return null;
+    const objeto = JSON.parse(texto);
+    objeto.versao = meta.versao;
+    return objeto;
+  } catch (e) {
+    return null;
+  }
+}
+
+/** Grava a cópia em partes. geracaoLida = geração observada ANTES de ler a planilha. */
+function gravarConsolidacaoEmCache(grupo, objeto, geracaoLida) {
+  const ttl = ttlCacheListagem();
+  if (!ttl) return;
+  try {
+    const cache = CacheService.getScriptCache();
+    const texto = JSON.stringify(objeto);
+    const id = Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+    const valores = {};
+    let partes = 0;
+    for (let pos = 0; pos < texto.length; pos += CACHE_LISTAGEM.TAMANHO_PARTE) {
+      valores[CACHE_LISTAGEM.PREFIXO + grupo + "_" + id + "_" + partes] = texto.slice(pos, pos + CACHE_LISTAGEM.TAMANHO_PARTE);
+      partes++;
+    }
+    if (typeof cache.putAll === "function") {
+      cache.putAll(valores, ttl);
+    } else {
+      for (const chave in valores) cache.put(chave, valores[chave], ttl);
+    }
+    // O cabeçalho vai por último: só passa a existir depois de todas as partes gravadas
+    cache.put(
+      CACHE_LISTAGEM.PREFIXO + grupo + "_META",
+      JSON.stringify({ id: id, partes: partes, tamanho: texto.length, versao: objeto.versao, dia: objeto.dia, ger: String(geracaoLida || "") }),
+      ttl
+    );
+  } catch (e) {
+    // Valor grande demais ou cache indisponível: segue sem cache
+  }
+}
+
+/**
+ * Etapa 1 (BASE). fresco = true ignora o cache e não grava nele (uso das transações).
+ */
+function obterBaseTerritorios(fresco) {
+  if (!fresco) {
+    const emCache = lerConsolidacaoEmCache("BASE");
+    if (emCache) return emCache;
+  }
+  const geracao = fresco ? "" : lerGeracaoListagem("BASE");
+  const base = consolidarBaseTerritorios();
+  base.versao = resumirConteudo(JSON.stringify(base.territorios));
+  if (!fresco) gravarConsolidacaoEmCache("BASE", base, geracao);
+  return base;
+}
+
+/**
+ * Etapa 2 (PROGRESSO): prédios do cartão e alfinetes de quadras, por número de território.
+ */
+function obterProgressoCampo(fresco, base) {
+  if (!fresco) {
+    const emCache = lerConsolidacaoEmCache("PROG");
+    if (emCache) return emCache;
+  }
+  const geracao = fresco ? "" : lerGeracaoListagem("PROG");
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const numerosAtivos = new Set(base.territorios.map(t => t._chave));
+  const progresso = {
+    dia: inicioDoDiaMs(),
+    // Descarta qualquer prédio fora dos territórios ativos
+    predios: carregarPrediosPorTerritorio(ss, numerosAtivos),
+    // Alfinetes de quadras já trabalhadas (só existem enquanto o cartão está em campo)
+    quadras: carregarQuadrasPorTerritorio(ss)
+  };
+  progresso.versao = resumirConteudo(JSON.stringify([progresso.predios, progresso.quadras]));
+  if (!fresco) gravarConsolidacaoEmCache("PROG", progresso, geracao);
+  return progresso;
+}
+
+/**
+ * Lista consolidada já com a visibilidade do usuário aplicada.
+ * opcoes.fresco = true: lê tudo da planilha (decisões transacionais: solicitar e devolver).
+ */
+function listarTodosTerritoriosConsolidados(usuarioSolicitante, opcoes) {
+  const fresco = Boolean(opcoes && opcoes.fresco);
+  const base = obterBaseTerritorios(fresco);
+  const progresso = obterProgressoCampo(fresco, base);
+  return projetarTerritoriosParaUsuario(base, progresso, usuarioSolicitante);
+}
+
+/**
+ * Etapa 1: lê BASE, DASHBOARD e Respostas e devolve a situação NEUTRA de cada território.
+ * Campos "_..." (e-mail e nome de quem está com o cartão, ciclos com e-mail) são internos:
+ * só projetarTerritoriosParaUsuario decide o que cada usuário pode ver.
+ */
+function consolidarBaseTerritorios() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const sheetBase = ss.getSheetByName("BASE");
   const sheetDash = ss.getSheetByName("DASHBOARD");
@@ -781,14 +983,9 @@ function listarTodosTerritoriosConsolidados(usuarioSolicitante) {
   ]);
 
   const listaNumeros = Array.from(todosNumerosSet).sort((a, b) => Number(a) - Number(b));
-  const agora = new Date();
-  const hojeMeiaNoiteMs = new Date(agora.getFullYear(), agora.getMonth(), agora.getDate()).getTime();
+  const hojeMeiaNoiteMs = inicioDoDiaMs();
   const fusoScript = Session.getScriptTimeZone();
   const resultado = [];
-  const emailSolicitante = usuarioSolicitante ? String(usuarioSolicitante.email || "").toLowerCase() : "";
-  const podeVerNomesHistorico =
-    (usuarioSolicitante && usuarioSolicitante.perfil === "ADMIN") ||
-    lerPropriedade("EXPOR_NOMES_HISTORICO", "false") === "true";
 
   for (const num of listaNumeros) {
     const infoBase = mapaBase[num] || { numero: num, bairro: (mapaPdf[num] && mapaPdf[num].bairroDash) || "Território " + num, tipo: "Cidade", wkt: "" };
@@ -806,7 +1003,6 @@ function listarTodosTerritoriosConsolidados(usuarioSolicitante) {
     let statusReal = "DISPONÍVEL";
     let dirigenteAtual = "";
     let emailAtual = "";
-    let emPosseDoUsuarioAtual = false;
 
     if (hist.length > 0) {
       const ultimo = hist[0];
@@ -819,12 +1015,6 @@ function listarTodosTerritoriosConsolidados(usuarioSolicitante) {
         statusReal = "OCUPADO";
         dirigenteAtual = ultimo.nome;
         emailAtual = emailResolvido;
-        // Identificador único por e-mail (ou match de primeiro nome caso linha manual antiga não tenha e-mail)
-        if (usuarioSolicitante) {
-          emPosseDoUsuarioAtual =
-            (emailResolvido && emailResolvido === usuarioSolicitante.email) ||
-            (!emailResolvido && ultimo.nome.toLowerCase() === usuarioSolicitante.nome.toLowerCase());
-        }
       } else {
         const dtRef = new Date(tsRef);
         const dtRefMeiaNoiteMs = new Date(dtRef.getFullYear(), dtRef.getMonth(), dtRef.getDate()).getTime();
@@ -872,15 +1062,8 @@ function listarTodosTerritoriosConsolidados(usuarioSolicitante) {
       ciclos.push(cicloAberto);
     }
 
-    // LGPD (minimização): o nome de quem trabalhou cada ciclo só é enviado a ADMIN
-    // ou ao próprio dirigente. Reverter com a ScriptProperty EXPOR_NOMES_HISTORICO = true.
-    const ciclosPublicos = ciclos.map(c => ({
-      dirigente: (podeVerNomesHistorico || (emailSolicitante && c._email === emailSolicitante)) ? c.dirigente : "",
-      dataDesignacao: c.dataDesignacao,
-      dataConclusao: c.dataConclusao
-    }));
-
     resultado.push({
+      _chave: num,
       numero: Number(num),
       codigoComposto: `${num} - ${infoBase.bairro}`,
       bairro: infoBase.bairro,
@@ -888,31 +1071,12 @@ function listarTodosTerritoriosConsolidados(usuarioSolicitante) {
       statusReal: statusReal,
       ultimaAcao: ultimaAcao,
       ultimaData: ultimaDataIso,
-      dirigente: usuarioSolicitante.perfil === "ADMIN" || statusReal === "OCUPADO" ? dirigenteAtual : "",
-      emailDirigente: usuarioSolicitante.perfil === "ADMIN" ? emailAtual : "",
-      emMinhaPosse: emPosseDoUsuarioAtual,
       nomePdf: (mapaPdf[num] && mapaPdf[num].nomePdf) || `Mapa_PatoBranco_${infoBase.bairro}_${num}.pdf`,
       wkt: infoBase.wkt,
-      ciclos: ciclosPublicos,
-      predios: [],
-      totalPredios: 0,
-      quadrasTrabalhadas: []
+      _dirigente: dirigenteAtual,
+      _emailPosse: emailAtual,
+      _ciclos: ciclos
     });
-  }
-
-  // Anexar prédios georreferenciados da Congregação Norte (descartando qualquer item fora dos 94 territórios ativos)
-  const mapaPredios = carregarPrediosPorTerritorio(ss, todosNumerosSet);
-  for (let i = 0; i < resultado.length; i++) {
-    const listaP = mapaPredios[String(resultado[i].numero)] || [];
-    resultado[i].predios = listaP;
-    resultado[i].totalPredios = listaP.length;
-  }
-
-  // Anexar os alfinetes de quadras já trabalhadas (só existem enquanto o cartão está em campo)
-  const mapaQuadras = carregarQuadrasPorTerritorio(ss);
-  for (let i = 0; i < resultado.length; i++) {
-    if (resultado[i].statusReal !== "OCUPADO") continue;
-    resultado[i].quadrasTrabalhadas = mapaQuadras[String(resultado[i].numero)] || [];
   }
 
   // Ordenação padrão por antiguidade (nunca trabalhados ou devolvidos há mais tempo primeiro)
@@ -929,7 +1093,143 @@ function listarTodosTerritoriosConsolidados(usuarioSolicitante) {
     return Number(a.numero) - Number(b.numero);
   });
 
-  return resultado;
+  return { dia: hojeMeiaNoiteMs, territorios: resultado };
+}
+
+/**
+ * Etapa 3: aplica as regras de visibilidade por usuário e anexa o progresso em campo.
+ * Monta objetos novos, campo a campo: nenhum campo interno "_..." chega à resposta.
+ */
+function projetarTerritoriosParaUsuario(base, progresso, usuarioSolicitante) {
+  const ehAdmin = Boolean(usuarioSolicitante && usuarioSolicitante.perfil === "ADMIN");
+  const emailUsuario = usuarioSolicitante ? String(usuarioSolicitante.email || "") : "";
+  const nomeUsuario = usuarioSolicitante ? String(usuarioSolicitante.nome || "").toLowerCase() : "";
+  const emailSolicitante = emailUsuario.toLowerCase();
+  const podeVerNomesHistorico = ehAdmin || lerPropriedade("EXPOR_NOMES_HISTORICO", "false") === "true";
+  const predios = (progresso && progresso.predios) || {};
+  const quadras = (progresso && progresso.quadras) || {};
+
+  return base.territorios.map(t => {
+    const ocupado = t.statusReal === "OCUPADO";
+
+    // Identificador único por e-mail (ou match de nome caso linha manual antiga não tenha e-mail)
+    const emMinhaPosse = Boolean(
+      ocupado && usuarioSolicitante && (
+        (t._emailPosse && t._emailPosse === emailUsuario) ||
+        (!t._emailPosse && String(t._dirigente || "").toLowerCase() === nomeUsuario)
+      )
+    );
+
+    // LGPD (minimização): o nome de quem trabalhou cada ciclo só é enviado a ADMIN
+    // ou ao próprio dirigente. Reverter com a ScriptProperty EXPOR_NOMES_HISTORICO = true.
+    const ciclosPublicos = (t._ciclos || []).map(c => ({
+      dirigente: (podeVerNomesHistorico || (emailSolicitante && c._email === emailSolicitante)) ? c.dirigente : "",
+      dataDesignacao: c.dataDesignacao,
+      dataConclusao: c.dataConclusao
+    }));
+
+    const listaPredios = predios[String(t.numero)] || [];
+
+    return {
+      numero: t.numero,
+      codigoComposto: t.codigoComposto,
+      bairro: t.bairro,
+      tipo: t.tipo,
+      statusReal: t.statusReal,
+      ultimaAcao: t.ultimaAcao,
+      ultimaData: t.ultimaData,
+      dirigente: ehAdmin || ocupado ? t._dirigente : "",
+      emailDirigente: ehAdmin ? t._emailPosse : "",
+      emMinhaPosse: emMinhaPosse,
+      nomePdf: t.nomePdf,
+      wkt: t.wkt,
+      ciclos: ciclosPublicos,
+      predios: listaPredios,
+      totalPredios: listaPredios.length,
+      quadrasTrabalhadas: ocupado ? (quadras[String(t.numero)] || []) : []
+    };
+  });
+}
+
+/**
+ * Versão da listagem para um usuário: muda quando muda a BASE, o PROGRESSO ou o que o usuário
+ * pode ver (perfil, conta, EXPOR_NOMES_HISTORICO). É o que o cliente devolve em versaoConhecida.
+ */
+function montarVersaoListagem(versaoBase, versaoProgresso, usuario) {
+  const visao = [
+    usuario && usuario.perfil === "ADMIN" ? "A" : "P",
+    lerPropriedade("EXPOR_NOMES_HISTORICO", "false") === "true" ? "N" : "",
+    resumirConteudo(String((usuario && usuario.email) || "").toLowerCase() + "|" + String((usuario && usuario.nome) || "").toLowerCase())
+  ].join("");
+  return versaoBase + "." + versaoProgresso + "." + visao;
+}
+
+/**
+ * Rota territorios/listar.
+ * - versaoConhecida: se o cliente já tem exatamente esta versão, responde { naoModificado: true }
+ *   sem montar (e, com cache quente, sem ler) a listagem.
+ * - geometriaSeparada: true -> os polígonos (wkt) saem dos territórios e vão em `geometria`,
+ *   enviados só quando versaoGeometria do cliente difere. Clientes antigos continuam recebendo
+ *   wkt dentro de cada território.
+ */
+function responderListagemTerritorios(usuario, payload) {
+  const inicio = Date.now();
+  const versaoCliente = String((payload && payload.versaoConhecida) || "");
+  const resposta = { sucesso: true, usuario: usuarioPublico(usuario), config: configClienteAutenticado() };
+
+  // Caminho rápido: só os cabeçalhos do cache bastam para saber que nada mudou
+  if (versaoCliente) {
+    const metaBase = lerMetaListagem("BASE");
+    const metaProg = metaBase ? lerMetaListagem("PROG") : null;
+    if (metaBase && metaProg && montarVersaoListagem(metaBase.versao, metaProg.versao, usuario) === versaoCliente) {
+      resposta.naoModificado = true;
+      resposta.versao = versaoCliente;
+      registrarTempoListagem(inicio, "nao-modificado-cache");
+      return respostaJson(resposta);
+    }
+  }
+
+  const base = obterBaseTerritorios(false);
+  const progresso = obterProgressoCampo(false, base);
+  resposta.versao = montarVersaoListagem(base.versao, progresso.versao, usuario);
+
+  if (versaoCliente && versaoCliente === resposta.versao) {
+    resposta.naoModificado = true;
+    registrarTempoListagem(inicio, "nao-modificado");
+    return respostaJson(resposta);
+  }
+
+  const territorios = projetarTerritoriosParaUsuario(base, progresso, usuario);
+
+  if (payload && payload.geometriaSeparada === true) {
+    const wkts = {};
+    for (const t of territorios) {
+      if (t.wkt) wkts[String(t.numero)] = t.wkt;
+      delete t.wkt;
+    }
+    const versaoGeometria = resumirConteudo(JSON.stringify(wkts));
+    resposta.geometria = { versao: versaoGeometria };
+    if (String(payload.versaoGeometria || "") !== versaoGeometria) resposta.geometria.wkts = wkts;
+  }
+
+  resposta.territorios = territorios;
+  registrarTempoListagem(inicio, "completa");
+  return respostaJson(resposta);
+}
+
+/** Medição (Spec 06, fase 0): tempo da listagem no log de execuções do Apps Script. */
+function registrarTempoListagem(inicioMs, tipo) {
+  try {
+    console.log(JSON.stringify({ medicao: "territorios/listar", tipo: tipo, ms: Date.now() - inicioMs }));
+  } catch (e) {}
+}
+
+/**
+ * Gatilho simples do Google Sheets: qualquer edição manual na planilha invalida o cache da listagem.
+ * (Inclusões por formulário ou por outros scripts não disparam onEdit; para elas vale o TTL.)
+ */
+function onEdit() {
+  invalidarCacheListagem();
 }
 
 /**
@@ -937,7 +1237,11 @@ function listarTodosTerritoriosConsolidados(usuarioSolicitante) {
  * CAMADA 10: OPERAÇÕES TRANSACIONAIS COM CONTROLE DE CONCORRÊNCIA (LockService)
  * ============================================================================
  */
-function executarComLock(callbackTransacional) {
+/**
+ * gruposCache: grupos do cache da listagem que a operação pode alterar (padrão: todos).
+ * A invalidação acontece ainda com o lock em mãos, antes de liberar a próxima operação.
+ */
+function executarComLock(callbackTransacional, gruposCache) {
   const lock = LockService.getScriptLock();
   if (!lock.tryLock(15000)) {
     return respostaJson({
@@ -949,6 +1253,7 @@ function executarComLock(callbackTransacional) {
   try {
     return callbackTransacional();
   } finally {
+    invalidarCacheListagem(gruposCache);
     lock.releaseLock();
   }
 }
@@ -976,7 +1281,8 @@ function solicitarTerritorioTransacional(usuario, payload) {
     return respostaJson({ sucesso: false, codigo: 400, erro: "Você pode selecionar no máximo 3 territórios por solicitação." });
   }
 
-  const todos = listarTodosTerritoriosConsolidados(usuario);
+  // Decisão transacional: sempre sobre leitura nova da planilha, nunca do cache
+  const todos = listarTodosTerritoriosConsolidados(usuario, { fresco: true });
   const selecionados = [];
   const conflitos = [];
 
@@ -1125,7 +1431,8 @@ function devolverTerritorioTransacional(usuario, payload) {
     });
   }
 
-  const todos = listarTodosTerritoriosConsolidados(usuario);
+  // Decisão transacional: sempre sobre leitura nova da planilha, nunca do cache
+  const todos = listarTodosTerritoriosConsolidados(usuario, { fresco: true });
   const territorio = todos.find(t => String(t.numero) === num);
 
   if (!territorio) {
