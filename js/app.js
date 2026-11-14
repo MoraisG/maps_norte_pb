@@ -31,34 +31,43 @@ const App = {
   },
 
   registrarServiceWorker() {
-    // Limpa caches legados de versões anteriores para evitar que o F5 volte ao sistema antigo
-    if ("caches" in window) {
-      caches.keys().then(keys => {
-        keys.forEach(k => {
-          if (k !== "territorios-pwa-shell-v13") {
-            caches.delete(k).catch(() => {});
-          }
+    if (!("serviceWorker" in navigator)) return;
+
+    // Havia um service worker no controle e outro assumiu: uma versão nova foi publicada com o
+    // app aberto. Em vez de recarregar sozinho (poderia interromper uma marcação), oferece o botão.
+    const haviaControlador = Boolean(navigator.serviceWorker.controller);
+    navigator.serviceWorker.addEventListener("controllerchange", () => {
+      if (haviaControlador) this.mostrarAvisoNovaVersao();
+    });
+
+    navigator.serviceWorker
+      .register("sw.js", { updateViaCache: "none" })
+      .then(reg => {
+        reg.update().catch(() => {});
+        // App instalado costuma ficar aberto por dias: confere se há versão nova ao voltar para ele
+        document.addEventListener("visibilitychange", () => {
+          if (!document.hidden) reg.update().catch(() => {});
         });
-      }).catch(() => {});
-    }
+      })
+      .catch(() => {});
+  },
 
-    if ("serviceWorker" in navigator) {
-      navigator.serviceWorker.getRegistrations().then(regs => {
-        regs.forEach(r => r.update().catch(() => {}));
-      }).catch(() => {});
-
-      navigator.serviceWorker
-        .register("sw.js", { updateViaCache: "none" })
-        .then(reg => {
-          reg.update().catch(() => {});
-        })
-        .catch(() => {});
-    }
+  mostrarAvisoNovaVersao() {
+    const aviso = document.getElementById("aviso-nova-versao");
+    if (aviso) aviso.hidden = false;
   },
 
   configurarEventosUI() {
-    document.getElementById("btn-logout").addEventListener("click", () => this.executarLogout());
-    document.getElementById("btn-refresh").addEventListener("click", () => this.sincronizarDados());
+    // Botões com ação assíncrona: spinner e trava contra clique duplo enquanto a chamada não termina
+    const ligarAcaoAssincrona = (el, acao) => {
+      if (!el) return;
+      el.addEventListener("click", () => {
+        if (Utils.estaOcupado(el)) return;
+        Utils.sinalizarOcupado(el, acao());
+      });
+    };
+    ligarAcaoAssincrona(document.getElementById("btn-logout"), () => this.executarLogout());
+    ligarAcaoAssincrona(document.getElementById("btn-refresh"), () => this.sincronizarDados());
 
     document.querySelectorAll(".nav-tab").forEach(btn => {
       btn.addEventListener("click", () => this.alternarAba(btn.dataset.tab));
@@ -81,12 +90,8 @@ const App = {
     if (btnLimparSel) {
       btnLimparSel.addEventListener("click", () => this.limparSelecaoLote());
     }
-    if (btnSolicitarLote) {
-      btnSolicitarLote.addEventListener("click", () => this.acaoSolicitarLote());
-    }
-    if (btnSolicitarAba) {
-      btnSolicitarAba.addEventListener("click", () => this.acaoSolicitarLote());
-    }
+    ligarAcaoAssincrona(btnSolicitarLote, () => this.acaoSolicitarLote());
+    ligarAcaoAssincrona(btnSolicitarAba, () => this.acaoSolicitarLote());
 
     // Dashboard e Relatório S-13
     this.inicializarSeletorAnoServico();
@@ -95,9 +100,7 @@ const App = {
       inputDashSearch.addEventListener("input", () => this.renderizarDashboardOcupacao());
     }
     const btnGerarPdf = document.getElementById("btn-gerar-pdf-ano-servico");
-    if (btnGerarPdf) {
-      btnGerarPdf.addEventListener("click", () => this.exportarRelatorioPdfAnoServico());
-    }
+    ligarAcaoAssincrona(btnGerarPdf, () => this.exportarRelatorioPdfAnoServico());
 
     // Modal do Mapa e Prédios do Cartão
     const btnCloseModal = document.getElementById("btn-close-modal-mapa");
@@ -127,14 +130,20 @@ const App = {
       if (this.usuarioAtual && this.territorios.length) this.processarLinkDireto();
     });
 
+    // Aviso de nova versão: recarrega para trocar os arquivos em uso pelos recém-publicados
+    document.getElementById("btn-atualizar-versao")?.addEventListener("click", () => location.reload());
+
     // Painel Admin
-    document.getElementById("form-admin-usuario").addEventListener("submit", e => {
+    const formUsuario = document.getElementById("form-admin-usuario");
+    formUsuario.addEventListener("submit", e => {
       e.preventDefault();
-      this.salvarUsuarioWhitelist();
+      const btnSalvar = e.submitter || formUsuario.querySelector('button[type="submit"]');
+      if (Utils.estaOcupado(btnSalvar)) return;
+      Utils.sinalizarOcupado(btnSalvar, this.salvarUsuarioWhitelist());
     });
 
-    document.getElementById("btn-admin-lembretes").addEventListener("click", () => this.dispararLembretesAdmin());
-    document.getElementById("btn-refresh-audit").addEventListener("click", () => this.carregarDadosAdmin());
+    ligarAcaoAssincrona(document.getElementById("btn-admin-lembretes"), () => this.dispararLembretesAdmin());
+    ligarAcaoAssincrona(document.getElementById("btn-refresh-audit"), () => this.carregarDadosAdmin());
   },
 
   inicializarBotaoGoogle() {
@@ -176,6 +185,9 @@ const App = {
     const loadingText = document.getElementById("login-loading");
     alertBox.classList.add("hidden");
     loadingText.classList.remove("hidden");
+    // Esconde o botão do Google durante a validação para não disparar um segundo login
+    const botaoGoogle = document.getElementById("google-btn-container");
+    if (botaoGoogle) botaoGoogle.style.visibility = "hidden";
 
     try {
       const res = await ApiClient.request("auth/login", { idToken: response.credential }, false);
@@ -188,6 +200,7 @@ const App = {
       alertBox.classList.remove("hidden");
     } finally {
       loadingText.classList.add("hidden");
+      if (botaoGoogle) botaoGoogle.style.visibility = "";
     }
   },
 
@@ -1531,8 +1544,8 @@ const ACOES_UI = {
   "abrir-mapa": el => MapaTerritorios.abrirModalTerritorio(Number(el.dataset.num), el.dataset.idPredio || undefined),
   "solicitar": el => App.acaoSolicitar(Number(el.dataset.num)),
   "devolver": el => App.acaoDevolver(Number(el.dataset.num)),
-  "modal-solicitar": el => { MapaTerritorios.fecharModalTerritorio(); App.acaoSolicitar(Number(el.dataset.num)); },
-  "modal-devolver": el => { MapaTerritorios.fecharModalTerritorio(); App.acaoDevolver(Number(el.dataset.num)); },
+  "modal-solicitar": el => { MapaTerritorios.fecharModalTerritorio(); return App.acaoSolicitar(Number(el.dataset.num)); },
+  "modal-devolver": el => { MapaTerritorios.fecharModalTerritorio(); return App.acaoDevolver(Number(el.dataset.num)); },
   "alternar-selecao": el => App.alternarSelecaoTerritorio(Number(el.dataset.num)),
   "filtrar-fila-predios": () => App.filtrarFilaComPredios(),
   "editar-usuario": el => App.preencherFormUsuario(Number(el.dataset.idx)),
@@ -1561,7 +1574,10 @@ document.addEventListener("click", (evento) => {
   if (!acao) return;
   // Só o elemento mais interno com data-acao é executado (equivale ao antigo stopPropagation)
   evento.preventDefault();
-  acao(alvo, evento);
+  // Ação assíncrona ainda em andamento neste botão: ignora o clique repetido
+  if (Utils.estaOcupado(alvo)) return;
+  // Ações que devolvem Promise (salvar, solicitar, devolver...) ganham spinner até terminarem
+  Utils.sinalizarOcupado(alvo, acao(alvo, evento));
 }, true);
 
 document.addEventListener("DOMContentLoaded", () => App.init());
