@@ -301,6 +301,38 @@ const Geo = {
    * Identificador permanente de quadra: hash (FNV-1a) do ponto de rótulo numa grade de ~5 m.
    * Reexecuções que movam o ponto menos que a grade preservam o ID.
    */
+  /**
+   * Ladrilhos de mapa (z, x, y no esquema XYZ/Web Mercator) que cobrem um retângulo de
+   * coordenadas, com margem em metros, para cada zoom pedido. Usado pelo pacote offline.
+   * limites = { sul, oeste, norte, leste } em graus.
+   */
+  ladrilhosDaArea(limites, zooms, margemMetros = 0) {
+    const latMedia = (limites.sul + limites.norte) / 2;
+    const margemLat = margemMetros / 111320;
+    const margemLng = margemMetros / (111320 * Math.max(0.01, Math.cos(latMedia * Math.PI / 180)));
+    const LAT_MAX = 85.05112878;   // limite da projeção Web Mercator
+    const sul = Math.max(-LAT_MAX, limites.sul - margemLat);
+    const norte = Math.min(LAT_MAX, limites.norte + margemLat);
+    const oeste = Math.max(-180, limites.oeste - margemLng);
+    const leste = Math.min(180, limites.leste + margemLng);
+
+    const saida = [];
+    for (const z of zooms) {
+      const n = Math.pow(2, z);
+      const coluna = lng => Math.min(n - 1, Math.max(0, Math.floor((lng + 180) / 360 * n)));
+      const linha = lat => {
+        const rad = lat * Math.PI / 180;
+        return Math.min(n - 1, Math.max(0, Math.floor((1 - Math.log(Math.tan(rad) + 1 / Math.cos(rad)) / Math.PI) / 2 * n)));
+      };
+      const x0 = coluna(oeste), x1 = coluna(leste);
+      const y0 = linha(norte), y1 = linha(sul);   // y cresce para o sul
+      for (let x = x0; x <= x1; x++) {
+        for (let y = y0; y <= y1; y++) saida.push({ z, x, y });
+      }
+    }
+    return saida;
+  },
+
   idQuadra(lat, lng) {
     const passo = 0.00005; // ≈ 5,5 m em latitude
     const chave = `${Math.round(lat / passo)}:${Math.round(lng / passo)}`;

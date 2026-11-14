@@ -33,7 +33,8 @@ const MapaTerritorios = {
   CHAVE_ESRI: "",
   FALHAS_SATELITE_PARA_DESISTIR: 4,
   ZOOM_MIN_DETALHES: 15,          // quadras numeradas e pinos de prédios só a partir deste zoom
-  VERSAO_QUADRAS_GEO: 17,         // manter igual à VERSAO de sw.js
+  VERSAO_QUADRAS_GEO: 18,         // manter igual à VERSAO de sw.js
+  _localizacao: new Map(),        // mapa -> estado do "minha posição" (GPS)
   _mapasComCamadas: [],           // [{ map, camadas }] para sincronizar a preferência entre os mapas
   rotulosLayerGroup: null,
   quadrasGeoLayer: null,          // mapa geral
@@ -178,32 +179,73 @@ const MapaTerritorios = {
   /** Foto de satélite + ladrilho transparente de nomes de vias, conforme haja ou não chave da Esri. */
   criarCamadasSatelite() {
     const atribEsri = 'Imagens &copy; <a href="https://www.esri.com/" target="_blank" rel="noopener noreferrer">Esri</a>, Maxar, Earthstar Geographics e comunidade GIS';
+    const modelos = this.modelosSatelite();
+    const camada = (modelo, opcoes) => L.tileLayer(modelo.url, Object.assign({
+      maxZoom: 20,
+      maxNativeZoom: modelo.zoomNativoMax,
+      attribution: atribEsri
+    }, modelo.ladrilho512 ? { tileSize: 512, zoomOffset: -1 } : {}, opcoes));
+    return {
+      imagem: camada(modelos.imagem),
+      // Nomes e traçado das vias sobre o satélite, desenhados acima dos polígonos (pane nomesRuas)
+      nomes: camada(modelos.nomes, { pane: "nomesRuas" })
+    };
+  },
+
+  /**
+   * Endereços dos ladrilhos de satélite (foto + nomes de vias), conforme haja ou não chave da Esri.
+   * Fonte única para as camadas do mapa e para o pacote offline (js/pacote-offline.js).
+   * ladrilho512: ladrilhos de 512 px pedidos um nível de zoom abaixo do zoom do mapa.
+   */
+  modelosSatelite() {
     // Com chave: serviço oficial de mapas-base (ibasemaps-api). Sem chave: endereço antigo.
     const chaveEsri = String(this.CHAVE_ESRI || "").trim();
     const baseEsri = chaveEsri
       ? "https://ibasemaps-api.arcgis.com/arcgis/rest/services"
       : "https://server.arcgisonline.com/ArcGIS/rest/services";
     const sufixoEsri = chaveEsri ? `?token=${encodeURIComponent(chaveEsri)}` : "";
-    const esri = (servico, opcoes) => L.tileLayer(`${baseEsri}/${servico}/MapServer/tile/{z}/{y}/{x}${sufixoEsri}`, Object.assign({
-      maxZoom: 20,
-      maxNativeZoom: 18,
-      attribution: atribEsri
-    }, opcoes));
-    const imagemSatelite = esri("World_Imagery");
-    // Nomes e traçado das vias sobre o satélite, desenhados acima dos polígonos (pane nomesRuas).
-    // Com chave: estilo transparente "arcgis/imagery/labels" do serviço Static Basemap Tiles
-    // (ladrilhos de 512 px). Sem chave: ladrilho de referência do endereço antigo.
-    const nomesVias = chaveEsri
-      ? L.tileLayer(`https://static-map-tiles-api.arcgis.com/arcgis/rest/services/static-basemap-tiles-service/v1/arcgis/imagery/labels/static/tile/{z}/{y}/{x}${sufixoEsri}`, {
-          pane: "nomesRuas",
-          tileSize: 512,
-          zoomOffset: -1,
-          maxZoom: 20,
-          maxNativeZoom: 19,
-          attribution: atribEsri
-        })
-      : esri("Reference/World_Transportation", { pane: "nomesRuas" });
-    return { imagem: imagemSatelite, nomes: nomesVias };
+    const esri = servico => `${baseEsri}/${servico}/MapServer/tile/{z}/{y}/{x}${sufixoEsri}`;
+    return {
+      imagem: { url: esri("World_Imagery"), zoomNativoMax: 18, ladrilho512: false },
+      // Com chave: estilo transparente "arcgis/imagery/labels" do serviço Static Basemap Tiles
+      // (ladrilhos de 512 px). Sem chave: ladrilho de referência do endereço antigo.
+      nomes: chaveEsri
+        ? { url: `https://static-map-tiles-api.arcgis.com/arcgis/rest/services/static-basemap-tiles-service/v1/arcgis/imagery/labels/static/tile/{z}/{y}/{x}${sufixoEsri}`, zoomNativoMax: 19, ladrilho512: true }
+        : { url: esri("Reference/World_Transportation"), zoomNativoMax: 18, ladrilho512: false }
+    };
+  },
+
+  /** Troca o fundo de um mapa já criado (sem alterar a preferência salva do usuário). */
+  usarCamadaBase(map, nome) {
+    const item = this._mapasComCamadas.find(m => m.map === map);
+    if (!item || !item.camadas[nome] || map.hasLayer(item.camadas[nome])) return;
+    // O controle de camadas do Leaflet também avisa trocas feitas por código: marca esta
+    // como automática para não virar preferência nem ser replicada aos outros mapas
+    this._trocaAutomaticaCamada = true;
+    try {
+      Object.values(item.camadas).forEach(camada => map.removeLayer(camada));
+      map.addLayer(item.camadas[nome]);
+    } finally {
+      this._trocaAutomaticaCamada = false;
+    }
+  },
+
+  /**
+   * Sem internet, o satélite só existe até o zoom baixado no pacote. Limita o zoom nativo das
+   * camadas de satélite a esse valor (acima dele o Leaflet amplia a imagem do pacote em vez de
+   * pedir ladrilhos que não existem). zoomMax = null devolve os valores originais.
+   */
+  ajustarZoomSatelite(map, zoomMax) {
+    const item = this._mapasComCamadas.find(m => m.map === map);
+    const grupo = item && item.camadas["Satélite"];
+    if (!grupo) return;
+    grupo.eachLayer(camada => {
+      if (camada._zoomNativoOriginal === undefined) camada._zoomNativoOriginal = camada.options.maxNativeZoom;
+      const novo = zoomMax ? Math.min(camada._zoomNativoOriginal, zoomMax) : camada._zoomNativoOriginal;
+      if (camada.options.maxNativeZoom === novo) return;
+      camada.options.maxNativeZoom = novo;
+      if (map.hasLayer(camada)) camada.redraw();
+    });
   },
 
   /**
@@ -238,6 +280,8 @@ const MapaTerritorios = {
     let falhasSeguidas = 0;
     imagem.on("tileload", () => { falhasSeguidas = 0; });
     imagem.on("tileerror", () => {
+      // Sem rede, ladrilho faltando é esperado (só existe o que foi baixado no pacote offline)
+      if (navigator.onLine === false) return;
       falhasSeguidas++;
       if (falhasSeguidas < this.FALHAS_SATELITE_PARA_DESISTIR || !map.hasLayer(grupo)) return;
       falhasSeguidas = 0;
@@ -263,11 +307,13 @@ const MapaTerritorios = {
     L.control.layers(camadas, sobreposicoes || {}, { position: "topright", collapsed: true }).addTo(map);
     L.control.scale({ imperial: false, maxWidth: 120, position: "bottomleft" }).addTo(map);
     this.criarControleNorte().addTo(map);
+    this.criarControleLocalizacao(map).addTo(map);
     if (map.attributionControl) map.attributionControl.setPrefix("Congregação Norte PB");
 
     this.vigiarFalhaSatelite(map, camadas);
     this._mapasComCamadas.push({ map, camadas });
     map.on("baselayerchange", evento => {
+      if (this._trocaAutomaticaCamada) return;
       try { localStorage.setItem(this.CHAVE_CAMADA_BASE, evento.name); } catch (e) {}
       // Replica a escolha nos outros mapas já criados
       for (const outro of this._mapasComCamadas) {
@@ -277,6 +323,150 @@ const MapaTerritorios = {
       }
     });
     return camadas;
+  },
+
+  /**
+   * ==========================================================================
+   * MINHA POSIÇÃO (GPS do aparelho; funciona sem internet)
+   * ==========================================================================
+   * A posição fica só na tela: não é enviada ao servidor nem gravada.
+   */
+  criarControleLocalizacao(map) {
+    const self = this;
+    const Controle = L.Control.extend({
+      options: { position: "topleft" },
+      onAdd() {
+        const el = L.DomUtil.create("button", "leaflet-bar controle-localizacao");
+        el.type = "button";
+        el.title = "Mostrar minha posição";
+        el.setAttribute("aria-label", "Mostrar minha posição no mapa");
+        el.setAttribute("aria-pressed", "false");
+        el.innerHTML = '<svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="12" cy="12" r="3.2" fill="currentColor"/><circle cx="12" cy="12" r="7" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>';
+        L.DomEvent.disableClickPropagation(el);
+        L.DomEvent.on(el, "click", () => self.alternarLocalizacao(map, el));
+        return el;
+      }
+    });
+    return new Controle();
+  },
+
+  alternarLocalizacao(map, botao) {
+    if (this._localizacao.has(map)) {
+      this.pararLocalizacao(map);
+      return;
+    }
+    if (!navigator.geolocation) {
+      Utils.mostrarToast("Este aparelho ou navegador não informa a localização.", "aviso");
+      return;
+    }
+    const estado = { botao, marcador: null, circulo: null, primeira: true, avisouErro: false, id: null };
+    this._localizacao.set(map, estado);
+    botao.setAttribute("aria-pressed", "true");
+    botao.classList.add("ativo");
+    estado.id = navigator.geolocation.watchPosition(
+      posicao => this.aoReceberPosicao(map, estado, posicao),
+      erro => {
+        if (erro && erro.code === 1) {
+          this.pararLocalizacao(map);
+          Utils.mostrarToast("Permissão de localização negada. Libere a localização para este app nas configurações do navegador.", "aviso");
+        } else if (!estado.avisouErro) {
+          estado.avisouErro = true;
+          Utils.mostrarToast("Ainda não foi possível obter sua posição. Em área aberta o GPS costuma responder melhor.", "aviso");
+        }
+      },
+      { enableHighAccuracy: true, maximumAge: 10000, timeout: 30000 }
+    );
+  },
+
+  aoReceberPosicao(map, estado, posicao) {
+    if (this._localizacao.get(map) !== estado) return;   // já foi desligado
+    const ponto = [posicao.coords.latitude, posicao.coords.longitude];
+    const precisao = Math.max(5, Number(posicao.coords.accuracy) || 0);
+    if (!estado.marcador) {
+      estado.circulo = L.circle(ponto, { radius: precisao, color: "#1a73e8", weight: 1, fillColor: "#1a73e8", fillOpacity: 0.12, interactive: false }).addTo(map);
+      estado.marcador = L.circleMarker(ponto, { radius: 7, color: "#ffffff", weight: 2.5, fillColor: "#1a73e8", fillOpacity: 1, interactive: false }).addTo(map);
+    } else {
+      estado.circulo.setLatLng(ponto).setRadius(precisao);
+      estado.marcador.setLatLng(ponto);
+    }
+    estado.marcador.bringToFront();
+    if (estado.primeira) {
+      estado.primeira = false;
+      // Só move o mapa se a pessoa estiver fora da área visível
+      if (!map.getBounds().contains(ponto)) map.panTo(ponto);
+    }
+  },
+
+  pararLocalizacao(map) {
+    const estado = this._localizacao.get(map);
+    if (!estado) return;
+    this._localizacao.delete(map);
+    try { navigator.geolocation.clearWatch(estado.id); } catch (e) {}
+    if (estado.marcador) map.removeLayer(estado.marcador);
+    if (estado.circulo) map.removeLayer(estado.circulo);
+    estado.botao.setAttribute("aria-pressed", "false");
+    estado.botao.classList.remove("ativo");
+  },
+
+  /**
+   * ==========================================================================
+   * PACOTE OFFLINE (mapa de satélite do território rural sem internet)
+   * ==========================================================================
+   */
+  limitesTerritorio(numero) {
+    const item = this.obterGeometrias().itens.get(Number(numero));
+    if (!item) return null;
+    const b = item.limites;
+    return { sul: b.getSouth(), oeste: b.getWest(), norte: b.getNorth(), leste: b.getEast() };
+  },
+
+  renderizarBarraOffline() {
+    const barra = document.getElementById("modal-offline-barra");
+    if (!barra) return;
+    const t = App.territorios.find(item => Number(item.numero) === this.territorioModalAtual);
+    const num = t ? Number(t.numero) : 0;
+    const info = t ? PacoteOffline.info(num) : null;
+    const progresso = t ? PacoteOffline.progresso(num) : null;
+    // Oferecido só para território rural que está com o usuário; pacote já baixado sempre aparece (para remover)
+    const podeBaixar = Boolean(t && PacoteOffline.permitido && this.ehRural(t) && t.emMinhaPosse);
+    if (!t || (!podeBaixar && !info && !progresso)) {
+      barra.hidden = true;
+      barra.innerHTML = "";
+      return;
+    }
+    barra.hidden = false;
+
+    if (progresso) {
+      const pct = progresso.total ? Math.round(progresso.feitos / progresso.total * 100) : 0;
+      barra.innerHTML = `
+        <div class="barra-offline-texto">
+          <strong>Baixando mapa de satélite… ${pct}%</strong>
+          <div class="barra-offline-progresso" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${pct}"><span style="width:${pct}%"></span></div>
+        </div>
+        <button type="button" data-acao="offline-cancelar" data-num="${num}" class="barra-offline-botao secundario">Cancelar</button>`;
+      return;
+    }
+
+    if (info) {
+      const quando = new Date(info.baixadoEm).toLocaleDateString("pt-BR");
+      const situacao = info.completo
+        ? `Disponível sem internet (baixado em ${quando})`
+        : `Baixado em parte em ${quando} — ${info.falhas} imagem(ns) faltando`;
+      barra.innerHTML = `
+        <div class="barra-offline-texto"><strong>${info.completo ? "✓" : "⚠"} ${Utils.escapeHtml(situacao)}</strong></div>
+        ${!info.completo && podeBaixar ? `<button type="button" data-acao="offline-baixar" data-num="${num}" class="barra-offline-botao">Completar</button>` : ""}
+        <button type="button" data-acao="offline-remover" data-num="${num}" class="barra-offline-botao secundario">Remover</button>`;
+      return;
+    }
+
+    const limites = this.limitesTerritorio(num);
+    const estimativa = limites ? PacoteOffline.estimar(limites, this.modelosSatelite()) : null;
+    barra.innerHTML = `
+      <div class="barra-offline-texto">
+        <strong>Usar este mapa sem internet</strong>
+        <span>Baixa as imagens de satélite deste território para o aparelho${estimativa ? ` (cerca de ${estimativa.megabytes} MB)` : ""}.</span>
+      </div>
+      <button type="button" data-acao="offline-baixar" data-num="${num}" class="barra-offline-botao">Baixar</button>`;
   },
 
   criarControleNorte() {
@@ -885,6 +1075,13 @@ const MapaTerritorios = {
     this.renderizarQuadrasGeoModal();
     this.atualizarRotulos(this.modalMap, this._rotulosModal);
 
+    this.renderizarBarraOffline();
+    // Sem rede e com o pacote baixado: abre direto no satélite (é o que existe no aparelho),
+    // limitado ao zoom que foi baixado
+    const pacote = navigator.onLine === false ? PacoteOffline.info(t.numero) : null;
+    if (pacote) this.usarCamadaBase(this.modalMap, "Satélite");
+    this.ajustarZoomSatelite(this.modalMap, pacote ? (pacote.zoomMax || PacoteOffline.ZOOM_MAX) : null);
+
     const limitesCartao = poly.getBounds();
     clearTimeout(this._modalTimer);
     this._modalTimer = setTimeout(() => {
@@ -1195,6 +1392,7 @@ const MapaTerritorios = {
     this.quadrasEdicao = null;
     this.territorioModalAtual = null;
     this._modalEnquadradoPara = null;
+    if (this.modalMap) this.pararLocalizacao(this.modalMap);
     this.limparLinkDireto("#t=");
     const modal = document.getElementById("modal-mapa-territorio");
     if (!modal) return;

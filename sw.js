@@ -5,10 +5,14 @@
  *   É o index.html que aponta para os arquivos ?v=N, então um F5 com rede sempre traz a versão publicada.
  * - Demais arquivos do próprio site (JS, CSS, vendor, geojson, ícones): responde do cache na hora e
  *   revalida em segundo plano. Publicar versão nova = subir o ?v= (index.html, VERSAO abaixo e js/app.js).
- * - API (Google Apps Script), login Google e ladrilhos de mapa não passam por aqui.
+ * - API (Google Apps Script) e login Google não passam por aqui.
+ * - Ladrilhos de mapa (outras origens) seguem direto para a rede, exceto quando existe um pacote
+ *   offline baixado (js/pacote-offline.js): aí o ladrilho guardado é servido primeiro.
  */
-const VERSAO = 17;
+const VERSAO = 18;
 const PREFIXO_CACHE = "territorios-pwa-shell-";
+const PREFIXO_PACOTE = "territorios-tiles-";   // pacotes offline de ladrilhos, um cache por território
+const DOWNLOADS_PARALELOS = 6;
 const CACHE_NAME = `${PREFIXO_CACHE}v${VERSAO}`;
 const ESPERA_NAVEGACAO_MS = 3000;
 const STATIC_ASSETS = [
@@ -27,6 +31,7 @@ const STATIC_ASSETS = [
   `./js/api.js?v=${VERSAO}`,
   `./js/armazenamento.js?v=${VERSAO}`,
   `./js/fila.js?v=${VERSAO}`,
+  `./js/pacote-offline.js?v=${VERSAO}`,
   `./js/map.js?v=${VERSAO}`,
   `./js/instalacao.js?v=${VERSAO}`,
   `./js/app.js?v=${VERSAO}`,
@@ -96,6 +101,90 @@ function responderArquivo(event) {
   return caches.match(request).then(emCache => emCache || daRede);
 }
 
+// ---------------------------------------------------------------------------------------------
+// Pacotes offline de ladrilhos
+// ---------------------------------------------------------------------------------------------
+let pacotesAtivos = null;            // null = ainda não se sabe (service worker acabou de iniciar)
+const downloadsCancelados = new Set();
+
+function conferirPacotes() {
+  return caches.keys()
+    .then(nomes => { pacotesAtivos = nomes.some(n => n.startsWith(PREFIXO_PACOTE)); })
+    .catch(() => { pacotesAtivos = false; });
+}
+conferirPacotes();
+
+/** Chave do ladrilho no cache: o endereço sem a chave de acesso (token) do provedor. */
+function chaveLadrilho(endereco) {
+  const u = new URL(endereco);
+  u.searchParams.delete("token");
+  return u.href;
+}
+
+async function responderLadrilho(request) {
+  try {
+    const chave = chaveLadrilho(request.url);
+    for (const nome of await caches.keys()) {
+      if (!nome.startsWith(PREFIXO_PACOTE)) continue;
+      const guardado = await (await caches.open(nome)).match(chave);
+      if (guardado) return guardado;
+    }
+  } catch (e) {}
+  return fetch(request);
+}
+
+/** Baixa os ladrilhos de um território; já baixados são pulados (permite retomar). */
+async function baixarPacote(dados, porta) {
+  const numero = String(dados.numero);
+  const urls = Array.isArray(dados.urls) ? dados.urls : [];
+  const avisar = msg => { try { if (porta) porta.postMessage(msg); } catch (e) {} };
+  downloadsCancelados.delete(numero);
+
+  let cache;
+  try {
+    cache = await caches.open(PREFIXO_PACOTE + numero);
+  } catch (e) {
+    avisar({ tipo: "ERRO" });
+    return;
+  }
+  pacotesAtivos = true;
+
+  let proximo = 0, feitos = 0, falhas = 0;
+  const trabalhar = async () => {
+    while (proximo < urls.length && !downloadsCancelados.has(numero)) {
+      const url = urls[proximo++];
+      try {
+        const chave = chaveLadrilho(url);
+        if (!(await cache.match(chave))) {
+          const resposta = await fetch(url, { mode: "cors", credentials: "omit" });
+          if (resposta && resposta.ok) await cache.put(chave, resposta);
+          else falhas++;
+        }
+      } catch (e) {
+        falhas++;
+      }
+      feitos++;
+      if (feitos % 10 === 0) avisar({ tipo: "PROGRESSO", feitos, total: urls.length });
+    }
+  };
+  await Promise.all(Array.from({ length: DOWNLOADS_PARALELOS }, trabalhar));
+
+  const cancelado = downloadsCancelados.delete(numero);
+  // Cancelado: o que não foi tentado conta como falta, para o pacote não ser dado como completo
+  avisar({ tipo: "FIM", total: urls.length, falhas: falhas + (urls.length - feitos), cancelado });
+}
+
+self.addEventListener("message", event => {
+  const dados = event.data || {};
+  if (dados.tipo === "PACOTE_BAIXAR") {
+    event.waitUntil(baixarPacote(dados, event.ports && event.ports[0]));
+  } else if (dados.tipo === "PACOTE_CANCELAR") {
+    downloadsCancelados.add(String(dados.numero));
+  } else if (dados.tipo === "PACOTES_MUDARAM") {
+    event.waitUntil(conferirPacotes());
+  }
+});
+
 self.addEventListener("fetch", event => {
   const url = new URL(event.request.url);
 
@@ -110,9 +199,12 @@ self.addEventListener("fetch", event => {
     return;
   }
 
-  // Ladrilhos dos mapas (OSM, Esri) e demais recursos de outras origens seguem direto para a
-  // rede, com o cache HTTP normal do navegador
+  // Outras origens (ladrilhos OSM/Esri, fontes): seguem direto para a rede, com o cache HTTP
+  // normal do navegador. Só quando há pacote offline baixado as imagens são procuradas nele antes.
   if (url.origin !== self.location.origin) {
+    if (pacotesAtivos !== false && event.request.destination === "image") {
+      event.respondWith(responderLadrilho(event.request));
+    }
     return;
   }
 
