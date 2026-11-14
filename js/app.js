@@ -12,6 +12,8 @@ const App = {
   usuariosAdmin: [],
   territoriosSelecionados: new Set(),
   _versaoListagem: "",                    // versão da última listagem aplicada (devolvida ao servidor em versaoConhecida)
+  _pendentesPorChave: {},                 // escritas de progresso em andamento, por prédio/território
+  _seriePorChave: {},
   _geometria: { versao: "", wkts: {} },   // polígonos por número de território, recebidos à parte da listagem
 
   init() {
@@ -238,13 +240,80 @@ const App = {
       badgeRole.className = "px-2.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider rounded-full bg-[#d3e3fd] text-[#041e49]";
     }
 
-    this.sincronizarDados();
+    this.abrirComRetratoLocal();
+  },
+
+  /**
+   * Abertura rápida: mostra na hora o retrato salvo no aparelho (se for desta conta) e só então
+   * sincroniza com o servidor em segundo plano.
+   */
+  async abrirComRetratoLocal() {
+    const usuario = this.usuarioAtual;
+    try {
+      // Outra conta neste aparelho: apaga os dados guardados e o que estava em memória
+      if (await Armazenamento.definirDono(usuario.email)) {
+        this.territorios = [];
+        this._versaoListagem = "";
+      }
+      const [retrato, geometria] = await Promise.all([Armazenamento.ler("retrato"), Armazenamento.ler("geometria")]);
+      // O usuário pode ter saído enquanto o banco local respondia
+      if (this.usuarioAtual !== usuario) return;
+      if (geometria && geometria.wkts) {
+        this._geometria = { versao: String(geometria.versao || ""), wkts: geometria.wkts };
+        this._geometriaSalva = this._geometria.versao;
+      }
+      if (retrato && Array.isArray(retrato.territorios) && retrato.territorios.length && !this.territorios.length) {
+        const lista = retrato.territorios.map(t => Object.assign({}, t, { wkt: this._geometria.wkts[String(t.numero)] || "" }));
+        this.aplicarListaTerritoriosServidor(lista);
+        this._versaoListagem = String(retrato.versao || "");
+      }
+    } catch (e) {
+      // Sem retrato utilizável: segue para a sincronização normal
+    }
+    if (this.usuarioAtual === usuario) this.sincronizarDados({ silencioso: this.territorios.length > 0 });
+  },
+
+  /** Grava no aparelho a listagem atual (sem polígonos e sem e-mail de terceiros). */
+  async salvarRetratoLocal() {
+    const usuario = this.usuarioAtual;
+    if (!usuario || !this.territorios.length) return;
+    const territorios = this.territorios.map(t => {
+      const copia = Object.assign({}, t);
+      delete copia.wkt;
+      delete copia.emailDirigente;
+      return copia;
+    });
+    await Armazenamento.gravar("retrato", {
+      versao: this._versaoListagem,
+      salvoEm: Date.now(),
+      usuario: { nome: usuario.nome, email: usuario.email, perfil: usuario.perfil },
+      territorios
+    });
+    // Polígonos mudam raramente: só regrava quando a versão recebida do servidor muda
+    if (this._geometriaSalva !== this._geometria.versao || !this._geometria.versao) {
+      const wkts = {};
+      for (const t of this.territorios) if (t.wkt) wkts[String(t.numero)] = t.wkt;
+      await Armazenamento.gravar("geometria", { versao: this._geometria.versao, wkts });
+      this._geometriaSalva = this._geometria.versao;
+    }
+  },
+
+  /** Depois de uma marcação local, regrava o retrato sem travar a tela (junta mudanças próximas). */
+  agendarSalvarRetrato() {
+    clearTimeout(this._temporizadorRetrato);
+    this._temporizadorRetrato = setTimeout(() => { this.salvarRetratoLocal().catch(() => {}); }, 400);
   },
 
   async executarLogout() {
     try {
       await ApiClient.request("auth/logout", {});
     } catch (e) {}
+    // Logout explícito apaga tudo o que foi guardado neste aparelho
+    clearTimeout(this._temporizadorRetrato);
+    await Armazenamento.limparTudo();
+    this.territorios = [];
+    this._geometria = { versao: "", wkts: {} };
+    this._geometriaSalva = undefined;
     this.sairParaTelaLogin();
   },
 
@@ -296,8 +365,12 @@ const App = {
     }
   },
 
-  async sincronizarDados() {
+  /** opcoes.silencioso: sincronização de fundo (não mostra aviso quando dá certo). */
+  async sincronizarDados(opcoes) {
     if (this.sincronizando) return;
+    const silencioso = Boolean(opcoes && opcoes.silencioso);
+    // Sincronização de fundo não atropela marcações que ainda estão sendo enviadas
+    if (silencioso && Object.keys(this._pendentesPorChave).length) return;
     this.sincronizando = true;
     try {
       // versaoConhecida: se nada mudou desde a última sincronização, o servidor responde só
@@ -311,7 +384,7 @@ const App = {
       if (res.config) MapaTerritorios.definirChaveEsri(res.config.chaveEsri);
 
       if (res.naoModificado) {
-        Utils.mostrarToast("Tudo atualizado: nenhuma mudança desde a última sincronização.", "sucesso");
+        if (!silencioso) Utils.mostrarToast("Tudo atualizado: nenhuma mudança desde a última sincronização.", "sucesso");
         return;
       }
 
@@ -324,7 +397,8 @@ const App = {
       );
       this.aplicarListaTerritoriosServidor(listaBruta);
       this._versaoListagem = String(res.versao || "");
-      Utils.mostrarToast(" Fila e mapas sincronizados!", "sucesso");
+      this.salvarRetratoLocal().catch(() => {});
+      if (!silencioso) Utils.mostrarToast(" Fila e mapas sincronizados!", "sucesso");
     } catch (err) {
       Utils.mostrarToast(err.message, "erro");
     } finally {
@@ -838,31 +912,85 @@ const App = {
    * Marca ou desmarca um prédio como trabalhado neste ciclo (LGPD-safe: apenas timestamp macro do prédio)
    */
   async acaoAlternarPredioTrabalhado(idPredio, numeroTerritorio, trabalhado) {
-    try {
-      const res = await ApiClient.request("predios/marcar-trabalhado", {
-        idPredio,
-        numeroTerritorio: Number(numeroTerritorio),
-        trabalhado: Boolean(trabalhado)
-      });
-
-      const t = this.territorios.find(item => Number(item.numero) === Number(numeroTerritorio));
-      if (t && Array.isArray(t.predios)) {
-        const p = t.predios.find(item => item.idPredio === idPredio);
-        if (p) {
-          p.trabalhadoNesteCiclo = Boolean(res.trabalhado);
-          p.ultimaDataConclusao = res.ultimaDataConclusao || "";
-        }
-      }
-
+    const chave = `predio:${idPredio}`;
+    const p = this.acharPredio(numeroTerritorio, idPredio);
+    const anterior = p ? { trabalhado: p.trabalhadoNesteCiclo, data: p.ultimaDataConclusao } : null;
+    const redesenhar = () => {
       this.renderizarCardsTerritorios();
       this.renderizarMeusTerritorios();
       if (MapaTerritorios.territorioModalAtual === Number(numeroTerritorio)) {
         MapaTerritorios.abrirModalTerritorio(Number(numeroTerritorio), idPredio);
       }
+    };
+
+    // Otimista: a tela muda na hora; o servidor confirma (ou desfaz) em seguida
+    if (p) {
+      p.trabalhadoNesteCiclo = Boolean(trabalhado);
+      p.ultimaDataConclusao = trabalhado ? this.dataDeHojeIso() : "";
+      redesenhar();
+      this.agendarSalvarRetrato();
+    }
+
+    try {
+      const res = await this.enviarProgresso(chave, "predios/marcar-trabalhado", {
+        idPredio,
+        numeroTerritorio: Number(numeroTerritorio),
+        trabalhado: Boolean(trabalhado)
+      });
+      // Só acerta com a resposta se não houver marcação mais nova deste prédio a caminho
+      const dataServidor = res.ultimaDataConclusao || "";
+      if (p && !this.haEscritaPendente(chave) &&
+          (p.trabalhadoNesteCiclo !== Boolean(res.trabalhado) || p.ultimaDataConclusao !== dataServidor)) {
+        p.trabalhadoNesteCiclo = Boolean(res.trabalhado);
+        p.ultimaDataConclusao = dataServidor;
+        redesenhar();
+        this.agendarSalvarRetrato();
+      }
       Utils.mostrarToast(res.mensagem, "sucesso");
     } catch (err) {
+      if (p && anterior && !this.haEscritaPendente(chave)) {
+        p.trabalhadoNesteCiclo = anterior.trabalhado;
+        p.ultimaDataConclusao = anterior.data;
+        redesenhar();
+        this.agendarSalvarRetrato();
+      }
       Utils.mostrarToast(err.message, "erro");
     }
+  },
+
+  acharPredio(numeroTerritorio, idPredio) {
+    const t = this.territorios.find(item => Number(item.numero) === Number(numeroTerritorio));
+    return t && Array.isArray(t.predios) ? t.predios.find(item => item.idPredio === idPredio) || null : null;
+  },
+
+  dataDeHojeIso() {
+    const d = new Date();
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+  },
+
+  /**
+   * Envia uma escrita de progresso (prédio, apartamentos, quadras). Escritas da mesma chave saem
+   * em série, na ordem em que foram feitas, para a última marcação ser a que vale no servidor.
+   */
+  enviarProgresso(chave, rota, payload) {
+    this._pendentesPorChave[chave] = (this._pendentesPorChave[chave] || 0) + 1;
+    const anterior = this._seriePorChave[chave] || Promise.resolve();
+    const atual = anterior.catch(() => {}).then(() => ApiClient.request(rota, payload));
+    this._seriePorChave[chave] = atual;
+    const concluir = () => {
+      this._pendentesPorChave[chave]--;
+      if (this._pendentesPorChave[chave] <= 0) {
+        delete this._pendentesPorChave[chave];
+        delete this._seriePorChave[chave];
+      }
+    };
+    atual.then(concluir, concluir);
+    return atual;
+  },
+
+  /** true enquanto houver outra escrita da mesma chave ainda sem resposta. */
+  haEscritaPendente(chave) {
+    return (this._pendentesPorChave[chave] || 0) > 0;
   },
 
   /**
@@ -881,24 +1009,43 @@ const App = {
   },
 
   async salvarApartamentosPredio(idPredio, numeroTerritorio, novaLista) {
-    try {
-      const res = await ApiClient.request("predios/marcar-apartamentos", {
-        idPredio,
-        numeroTerritorio: Number(numeroTerritorio),
-        apartamentos: novaLista
-      });
-
-      const t = this.territorios.find(item => Number(item.numero) === Number(numeroTerritorio));
-      const p = t && Array.isArray(t.predios) ? t.predios.find(item => item.idPredio === idPredio) : null;
-      if (p) p.aptosTrabalhados = Array.isArray(res.aptosTrabalhados) ? res.aptosTrabalhados : [];
-
+    const chave = `aptos:${idPredio}`;
+    const p = this.acharPredio(numeroTerritorio, idPredio);
+    const anterior = p && Array.isArray(p.aptosTrabalhados) ? p.aptosTrabalhados.slice() : [];
+    const redesenhar = () => {
       this.renderizarCardsTerritorios();
       this.renderizarMeusTerritorios();
       if (MapaTerritorios.territorioModalAtual === Number(numeroTerritorio)) {
         MapaTerritorios.atualizarListaPrediosModal(idPredio);
       }
+    };
+
+    // Otimista: a lista aparece na hora, na mesma ordem que o servidor devolveria
+    if (p) {
+      p.aptosTrabalhados = novaLista.slice().sort((a, b) => String(a).localeCompare(String(b), "pt-BR", { numeric: true }));
+      redesenhar();
+      this.agendarSalvarRetrato();
+    }
+
+    try {
+      const res = await this.enviarProgresso(chave, "predios/marcar-apartamentos", {
+        idPredio,
+        numeroTerritorio: Number(numeroTerritorio),
+        apartamentos: novaLista
+      });
+      const listaServidor = Array.isArray(res.aptosTrabalhados) ? res.aptosTrabalhados : [];
+      if (p && !this.haEscritaPendente(chave) && JSON.stringify(p.aptosTrabalhados) !== JSON.stringify(listaServidor)) {
+        p.aptosTrabalhados = listaServidor;
+        redesenhar();
+        this.agendarSalvarRetrato();
+      }
       return true;
     } catch (err) {
+      if (p && !this.haEscritaPendente(chave)) {
+        p.aptosTrabalhados = anterior;
+        redesenhar();
+        this.agendarSalvarRetrato();
+      }
       Utils.mostrarToast(err.message, "erro");
       return false;
     }
@@ -970,25 +1117,44 @@ const App = {
    */
   async acaoSalvarQuadras() {
     const edicao = MapaTerritorios.quadrasEdicao;
-    if (!edicao || this._salvandoQuadras) return;
-    this._salvandoQuadras = true;
-    try {
-      const res = await ApiClient.request("quadras/salvar", {
-        numeroTerritorio: edicao.numero,
-        pinos: edicao.pinos
-      });
-      const t = this.territorios.find(item => Number(item.numero) === edicao.numero);
-      if (t) t.quadrasTrabalhadas = Array.isArray(res.quadrasTrabalhadas) ? res.quadrasTrabalhadas : [];
-
-      if (MapaTerritorios.quadrasEdicao === edicao) MapaTerritorios.quadrasEdicao = null;
+    if (!edicao) return;
+    const chave = `quadras:${edicao.numero}`;
+    const t = this.territorios.find(item => Number(item.numero) === edicao.numero);
+    const anterior = t && Array.isArray(t.quadrasTrabalhadas) ? t.quadrasTrabalhadas : [];
+    const redesenhar = () => {
       MapaTerritorios.renderizarQuadrasModal();
       this.renderizarCardsTerritorios();
       this.renderizarMeusTerritorios();
+    };
+
+    // Otimista: fecha a edição e mostra os alfinetes como salvos; o servidor confirma em seguida
+    if (t) t.quadrasTrabalhadas = edicao.pinos.map(pino => ({ lat: pino.lat, lng: pino.lng }));
+    MapaTerritorios.quadrasEdicao = null;
+    redesenhar();
+    this.agendarSalvarRetrato();
+
+    try {
+      const res = await this.enviarProgresso(chave, "quadras/salvar", {
+        numeroTerritorio: edicao.numero,
+        pinos: edicao.pinos
+      });
+      if (t && !this.haEscritaPendente(chave)) {
+        t.quadrasTrabalhadas = Array.isArray(res.quadrasTrabalhadas) ? res.quadrasTrabalhadas : [];
+        redesenhar();
+        this.agendarSalvarRetrato();
+      }
       Utils.mostrarToast(res.mensagem, "sucesso");
     } catch (err) {
+      if (!this.haEscritaPendente(chave)) {
+        if (t) t.quadrasTrabalhadas = anterior;
+        // Devolve a edição recusada para o dirigente corrigir, se ele ainda estiver neste cartão
+        if (!MapaTerritorios.quadrasEdicao && MapaTerritorios.territorioModalAtual === edicao.numero) {
+          MapaTerritorios.quadrasEdicao = edicao;
+        }
+        redesenhar();
+        this.agendarSalvarRetrato();
+      }
       Utils.mostrarToast(err.message, "erro");
-    } finally {
-      this._salvandoQuadras = false;
     }
   },
 
