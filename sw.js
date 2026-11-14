@@ -7,7 +7,7 @@
  *   revalida em segundo plano. Publicar versão nova = subir o ?v= (index.html, VERSAO abaixo e js/app.js).
  * - API (Google Apps Script), login Google e ladrilhos de mapa não passam por aqui.
  */
-const VERSAO = 14;
+const VERSAO = 15;
 const PREFIXO_CACHE = "territorios-pwa-shell-";
 const CACHE_NAME = `${PREFIXO_CACHE}v${VERSAO}`;
 const ESPERA_NAVEGACAO_MS = 3000;
