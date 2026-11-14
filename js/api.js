@@ -93,6 +93,12 @@ const ApiClient = {
     return response.json();
   },
 
+  erroSemRede(mensagem) {
+    const erro = new Error(mensagem || "Sem conexão com o servidor. Verifique a internet e tente novamente.");
+    erro.semRede = true;
+    return erro;
+  },
+
   /**
    * Executa chamada autenticada para o Google Apps Script
    */
@@ -108,6 +114,8 @@ const ApiClient = {
 
     const sessionToken = this.obterTokenSessao();
     if (exigirSessao && !sessionToken) {
+      // Sem rede não adianta mandar para o login: quem chamou decide (ex.: guardar na fila offline)
+      if (navigator.onLine === false) throw this.erroSemRede();
       window.dispatchEvent(new CustomEvent("sessao-expirada"));
       throw new Error("Sessão expirada. Faça login novamente.");
     }
@@ -118,21 +126,33 @@ const ApiClient = {
       ...payload
     });
 
-    const response = await fetch(apiUrl, {
-      method: "POST",
-      headers: {
-        // Content-Type text/plain evita que o navegador falhe no OPTIONS preflight do Google Apps Script
-        "Content-Type": "text/plain;charset=utf-8"
-      },
-      body: corpo,
-      redirect: "follow"
-    });
-
-    if (!response.ok) {
-      throw new Error(`Falha de comunicação HTTP (${response.status})`);
+    // Falhas de comunicação (sem rede, servidor fora do ar, resposta ilegível) saem marcadas com
+    // semRede = true: são passageiras, diferentes de uma recusa do servidor (erro com código).
+    let response;
+    try {
+      response = await fetch(apiUrl, {
+        method: "POST",
+        headers: {
+          // Content-Type text/plain evita que o navegador falhe no OPTIONS preflight do Google Apps Script
+          "Content-Type": "text/plain;charset=utf-8"
+        },
+        body: corpo,
+        redirect: "follow"
+      });
+    } catch (e) {
+      throw this.erroSemRede();
     }
 
-    const data = await response.json();
+    if (!response.ok) {
+      throw this.erroSemRede(`Falha de comunicação HTTP (${response.status})`);
+    }
+
+    let data;
+    try {
+      data = await response.json();
+    } catch (e) {
+      throw this.erroSemRede("O servidor devolveu uma resposta inesperada. Tente novamente em instantes.");
+    }
 
     if (!data.sucesso) {
       if (data.codigo === 401) {

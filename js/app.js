@@ -11,6 +11,8 @@ const App = {
   territorios: [],
   usuariosAdmin: [],
   territoriosSelecionados: new Set(),
+  modoLocal: false,                       // sem rede e sem sessão: só os cartões do retrato local
+  DIAS_MODO_LOCAL: 30,                    // validade do retrato para abrir em modo local
   _versaoListagem: "",                    // versão da última listagem aplicada (devolvida ao servidor em versaoConhecida)
   _pendentesPorChave: {},                 // escritas de progresso em andamento, por prédio/território
   _seriePorChave: {},
@@ -27,11 +29,132 @@ const App = {
       this.entrarModoAutenticado();
     } else {
       this.inicializarBotaoGoogle();
+      this.tentarModoLocal();
     }
 
     window.addEventListener("sessao-expirada", () => {
       this.sairParaTelaLogin("Sua sessão expirou. Por favor, entre novamente com sua conta Google.");
     });
+
+    // Conexão e fila de escritas pendentes
+    FilaEscrita.definirOuvinte(() => this.atualizarFaixasConexao());
+    window.addEventListener("online", () => this.aoVoltarConexao());
+    window.addEventListener("offline", () => this.atualizarFaixasConexao());
+    document.addEventListener("visibilitychange", () => {
+      if (!document.hidden && this.usuarioAtual && !this.modoLocal) this.enviarFilaPendente();
+    });
+    this.atualizarFaixasConexao();
+  },
+
+  /** true quando não dá para falar com o servidor agora (sem rede ou em modo somente local). */
+  semConexao() {
+    return Boolean(this.modoLocal) || navigator.onLine === false;
+  },
+
+  /**
+   * Modo somente local: aparelho sem rede e sem sessão (ex.: app reaberto em campo). Mostra só os
+   * cartões que estavam com o último usuário deste aparelho, a partir do retrato salvo, e guarda
+   * as marcações na fila. Nada é pedido ao servidor; ao voltar a conexão, o login é exigido.
+   */
+  async tentarModoLocal() {
+    if (navigator.onLine !== false) return;
+    try {
+      const [retrato, geometria] = await Promise.all([Armazenamento.ler("retrato"), Armazenamento.ler("geometria")]);
+      const recente = retrato && Date.now() - Number(retrato.salvoEm || 0) < this.DIAS_MODO_LOCAL * 86400000;
+      if (!recente || !retrato.usuario || !Array.isArray(retrato.territorios)) return;
+      if (this.usuarioAtual || navigator.onLine !== false) return;   // logou ou a rede voltou enquanto lia
+
+      const wkts = (geometria && geometria.wkts) || {};
+      const meus = retrato.territorios
+        .filter(t => t.emMinhaPosse)
+        .map(t => Object.assign({}, t, { wkt: wkts[String(t.numero)] || "" }));
+      if (!meus.length) return;
+
+      this.modoLocal = true;
+      this.usuarioAtual = retrato.usuario;
+      this._geometria = { versao: String((geometria && geometria.versao) || ""), wkts };
+      this._geometriaSalva = this._geometria.versao;
+      this.entrarModoAutenticado();
+      this.aplicarListaTerritoriosServidor(meus);
+      this.alternarAba("tab-meus");
+      this.atualizarFaixasConexao();
+    } catch (e) {
+      // Sem retrato utilizável: permanece na tela de login
+    }
+  },
+
+  /** A rede voltou: sai do modo local (o login é exigido) ou envia o que ficou na fila. */
+  aoVoltarConexao() {
+    if (this.modoLocal) {
+      // O botão do Google não carregou sem rede: recarregar leva à tela de login já funcional
+      location.reload();
+      return;
+    }
+    this.atualizarFaixasConexao();
+    if (this.usuarioAtual) this.enviarFilaPendente().then(r => { if (r && r.enviados) this.sincronizarDados({ silencioso: true }); });
+  },
+
+  /** Envia a fila do aparelho (se houver) e avisa o resultado. */
+  async enviarFilaPendente(opcoes) {
+    if (!this.usuarioAtual || this.modoLocal) return null;
+    const r = await FilaEscrita.descarregar(this.usuarioAtual.email);
+    if (r.enviados) Utils.mostrarToast(`${r.enviados} alteração(ões) feita(s) sem conexão foram enviadas.`, "sucesso");
+    else if (opcoes && opcoes.manual && r.restantes) Utils.mostrarToast("Ainda sem conexão com o servidor. As alterações continuam guardadas no aparelho.", "aviso");
+    if (r.recusados) Utils.mostrarToast(`${r.recusados} alteração(ões) não foram aceitas pelo servidor. Toque em "Ver" para os detalhes.`, "erro");
+    this.atualizarFaixasConexao();
+    return r;
+  },
+
+  avisarGuardadoNoAparelho() {
+    Utils.mostrarToast("Sem conexão: salvo no aparelho. Será enviado quando a internet voltar.", "aviso");
+    this.atualizarFaixasConexao();
+  },
+
+  /** Atualiza as faixas "sem conexão" e "alterações aguardando envio". */
+  async atualizarFaixasConexao() {
+    const faixaOffline = document.getElementById("faixa-offline");
+    if (faixaOffline) {
+      faixaOffline.hidden = !this.semConexao();
+      faixaOffline.textContent = this.modoLocal
+        ? "Sem conexão — mostrando só os seus cartões salvos neste aparelho. As marcações serão enviadas depois do login."
+        : "Sem conexão — trabalhando com os dados salvos neste aparelho.";
+    }
+    const faixaFila = document.getElementById("faixa-fila");
+    if (!faixaFila) return;
+    const email = this.usuarioAtual ? this.usuarioAtual.email : "";
+    const { pendentes, recusados } = email ? await FilaEscrita.contar(email) : { pendentes: 0, recusados: 0 };
+    faixaFila.hidden = !(pendentes || recusados);
+    const partes = [];
+    if (pendentes) partes.push(`${pendentes} ${pendentes === 1 ? "alteração aguardando" : "alterações aguardando"} envio`);
+    if (recusados) partes.push(`${recusados} não ${recusados === 1 ? "enviada" : "enviadas"}`);
+    document.getElementById("faixa-fila-texto").textContent = partes.join(" · ");
+    document.getElementById("btn-enviar-fila").hidden = !pendentes || this.semConexao();
+    document.getElementById("btn-ver-recusados").hidden = !recusados;
+  },
+
+  /** Mostra as alterações que o servidor não aceitou (ex.: cartão já devolvido) e permite dispensá-las. */
+  async mostrarNaoEnviados() {
+    if (!this.usuarioAtual) return;
+    const itens = await FilaEscrita.listarRecusados(this.usuarioAtual.email);
+    if (!itens.length) return;
+    const nomes = { "predios/marcar-trabalhado": "Prédio trabalhado", "predios/marcar-apartamentos": "Apartamentos trabalhados", "quadras/salvar": "Quadras trabalhadas" };
+    const linhas = itens.map(i => {
+      const territorio = i.payload && i.payload.numeroTerritorio ? ` — Território ${Number(i.payload.numeroTerritorio)}` : "";
+      return `<li><strong>${Utils.escapeHtml(nomes[i.rota] || i.rota)}${Utils.escapeHtml(territorio)}</strong><br>${Utils.escapeHtml(i.recusado.motivo)}</li>`;
+    }).join("");
+    const dispensar = await ModalM3.confirmar({
+      titulo: "Alterações não enviadas",
+      mensagem: "Estas marcações foram feitas sem conexão e o servidor não aceitou:",
+      detalhesHtml: `<ul class="lista-nao-enviados">${linhas}</ul>`,
+      textoConfirmar: "Dispensar",
+      textoCancelar: "Fechar",
+      icone: "⚠️"
+    });
+    if (dispensar) {
+      await FilaEscrita.descartarRecusados(this.usuarioAtual.email);
+      this._versaoListagem = "";
+      this.sincronizarDados({ silencioso: true });
+    }
   },
 
   registrarServiceWorker() {
@@ -133,6 +256,12 @@ const App = {
     window.addEventListener("hashchange", () => {
       if (this.usuarioAtual && this.territorios.length) this.processarLinkDireto();
     });
+
+    // Fila de alterações feitas sem conexão
+    ligarAcaoAssincrona(document.getElementById("btn-enviar-fila"), () => this.enviarFilaPendente({ manual: true }).then(r => {
+      if (r && r.enviados) return this.sincronizarDados({ silencioso: true });
+    }));
+    document.getElementById("btn-ver-recusados")?.addEventListener("click", () => this.mostrarNaoEnviados());
 
     // Aviso de nova versão: recarrega para trocar os arquivos em uso pelos recém-publicados
     document.getElementById("btn-atualizar-versao")?.addEventListener("click", () => location.reload());
@@ -240,7 +369,7 @@ const App = {
       badgeRole.className = "px-2.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider rounded-full bg-[#d3e3fd] text-[#041e49]";
     }
 
-    this.abrirComRetratoLocal();
+    if (!this.modoLocal) this.abrirComRetratoLocal();
   },
 
   /**
@@ -270,19 +399,32 @@ const App = {
     } catch (e) {
       // Sem retrato utilizável: segue para a sincronização normal
     }
-    if (this.usuarioAtual === usuario) this.sincronizarDados({ silencioso: this.territorios.length > 0 });
+    if (this.usuarioAtual !== usuario) return;
+    this.atualizarFaixasConexao();
+    // sincronizarDados envia antes o que ficou na fila do aparelho
+    this.sincronizarDados({ silencioso: this.territorios.length > 0 });
   },
 
   /** Grava no aparelho a listagem atual (sem polígonos e sem e-mail de terceiros). */
   async salvarRetratoLocal() {
     const usuario = this.usuarioAtual;
     if (!usuario || !this.territorios.length) return;
-    const territorios = this.territorios.map(t => {
+    const limpar = t => {
       const copia = Object.assign({}, t);
       delete copia.wkt;
       delete copia.emailDirigente;
       return copia;
-    });
+    };
+    if (this.modoLocal) {
+      // Em modo local a tela só tem os cartões do usuário: troca esses no retrato e mantém os demais
+      const retrato = await Armazenamento.ler("retrato");
+      if (!retrato || !Array.isArray(retrato.territorios)) return;
+      const atuais = new Map(this.territorios.map(t => [Number(t.numero), limpar(t)]));
+      retrato.territorios = retrato.territorios.map(t => atuais.get(Number(t.numero)) || t);
+      await Armazenamento.gravar("retrato", retrato);
+      return;
+    }
+    const territorios = this.territorios.map(limpar);
     await Armazenamento.gravar("retrato", {
       versao: this._versaoListagem,
       salvoEm: Date.now(),
@@ -305,9 +447,23 @@ const App = {
   },
 
   async executarLogout() {
+    const email = this.usuarioAtual ? this.usuarioAtual.email : "";
+    const { pendentes } = email ? await FilaEscrita.contar(email) : { pendentes: 0 };
+    if (pendentes) {
+      const sair = await ModalM3.confirmar({
+        titulo: "Sair e perder alterações?",
+        mensagem: `Há ${pendentes} alteração(ões) feita(s) sem conexão que ainda não foram enviadas. Ao sair, elas serão apagadas deste aparelho.`,
+        textoConfirmar: "Sair mesmo assim",
+        textoCancelar: "Continuar no app",
+        variante: "perigo",
+        icone: "⚠️"
+      });
+      if (!sair) return;
+    }
     try {
-      await ApiClient.request("auth/logout", {});
+      if (!this.semConexao()) await ApiClient.request("auth/logout", {});
     } catch (e) {}
+    this.modoLocal = false;
     // Logout explícito apaga tudo o que foi guardado neste aparelho
     clearTimeout(this._temporizadorRetrato);
     await Armazenamento.limparTudo();
@@ -371,6 +527,15 @@ const App = {
     const silencioso = Boolean(opcoes && opcoes.silencioso);
     // Sincronização de fundo não atropela marcações que ainda estão sendo enviadas
     if (silencioso && Object.keys(this._pendentesPorChave).length) return;
+    if (this.modoLocal) return;
+    // Primeiro sobe o que foi marcado sem conexão; enquanto houver pendência, a lista do servidor
+    // não é aplicada (apagaria da tela marcações que ainda não chegaram lá)
+    const fila = await this.enviarFilaPendente();
+    if (fila && fila.restantes) {
+      if (!silencioso) Utils.mostrarToast("Há alterações aguardando envio. A lista será atualizada depois que elas forem enviadas.", "aviso");
+      return;
+    }
+    if (fila && fila.enviados) this._versaoListagem = "";
     this.sincronizando = true;
     try {
       // versaoConhecida: se nada mudou desde a última sincronização, o servidor responde só
@@ -803,6 +968,7 @@ const App = {
 
   async executarFluxoSolicitacao(numeros) {
     if (!numeros.length) return;
+    if (this.avisarSePrecisaDeConexao("Solicitar território")) return;
     if (numeros.length > Utils.LIMITE_SELECAO_LOTE) {
       await ModalM3.alerta({
         icone: "⚠️",
@@ -887,9 +1053,17 @@ const App = {
    *      * Prédios não trabalhados -> Concluído (quarentena 120 dias)
    *      * Não iniciado -> Volta para a fila como DISPONÍVEL sem data de início e sem data de conclusão
    */
+  /** Solicitar e devolver dependem da fila no servidor: sem conexão, só avisa. */
+  avisarSePrecisaDeConexao(acao) {
+    if (!this.semConexao()) return false;
+    Utils.mostrarToast(`${acao} precisa de conexão com a internet. As marcações de progresso continuam funcionando.`, "aviso");
+    return true;
+  },
+
   async acaoDevolver(numero) {
     const t = this.territorios.find(item => Number(item.numero) === Number(numero));
     if (!t) return;
+    if (this.avisarSePrecisaDeConexao("Devolver território")) return;
 
     const decisao = await ModalM3.abrirDevolucaoDuasEtapas(t);
     if (!decisao) return;
@@ -937,6 +1111,7 @@ const App = {
         numeroTerritorio: Number(numeroTerritorio),
         trabalhado: Boolean(trabalhado)
       });
+      if (res.enfileirado) return this.avisarGuardadoNoAparelho();
       // Só acerta com a resposta se não houver marcação mais nova deste prédio a caminho
       const dataServidor = res.ultimaDataConclusao || "";
       if (p && !this.haEscritaPendente(chave) &&
@@ -971,11 +1146,13 @@ const App = {
   /**
    * Envia uma escrita de progresso (prédio, apartamentos, quadras). Escritas da mesma chave saem
    * em série, na ordem em que foram feitas, para a última marcação ser a que vale no servidor.
+   * Sem conexão, a escrita fica na fila do aparelho e a resposta é { enfileirado: true }.
    */
   enviarProgresso(chave, rota, payload) {
     this._pendentesPorChave[chave] = (this._pendentesPorChave[chave] || 0) + 1;
     const anterior = this._seriePorChave[chave] || Promise.resolve();
-    const atual = anterior.catch(() => {}).then(() => ApiClient.request(rota, payload));
+    const email = this.usuarioAtual ? this.usuarioAtual.email : "";
+    const atual = anterior.catch(() => {}).then(() => FilaEscrita.enviar(rota, payload, chave, email));
     this._seriePorChave[chave] = atual;
     const concluir = () => {
       this._pendentesPorChave[chave]--;
@@ -1033,6 +1210,7 @@ const App = {
         numeroTerritorio: Number(numeroTerritorio),
         apartamentos: novaLista
       });
+      if (res.enfileirado) { this.avisarGuardadoNoAparelho(); return true; }
       const listaServidor = Array.isArray(res.aptosTrabalhados) ? res.aptosTrabalhados : [];
       if (p && !this.haEscritaPendente(chave) && JSON.stringify(p.aptosTrabalhados) !== JSON.stringify(listaServidor)) {
         p.aptosTrabalhados = listaServidor;
@@ -1086,7 +1264,7 @@ const App = {
     campo.disabled = true;
     const ok = await this.salvarApartamentosPredio(idPredio, numeroTerritorio, novaLista);
     if (ok) {
-      Utils.mostrarToast(`${novaLista.length - atuais.length} apartamento(s) registrado(s) como trabalhado(s).`, "sucesso");
+      if (!this.semConexao()) Utils.mostrarToast(`${novaLista.length - atuais.length} apartamento(s) registrado(s) como trabalhado(s).`, "sucesso");
     } else {
       campo.disabled = false;
     }
@@ -1099,7 +1277,7 @@ const App = {
     const novaLista = p.aptosTrabalhados.filter(a => a !== apto);
     if (novaLista.length === p.aptosTrabalhados.length) return;
     const ok = await this.salvarApartamentosPredio(idPredio, numeroTerritorio, novaLista);
-    if (ok) Utils.mostrarToast(`Apartamento ${apto} removido da lista.`, "sucesso");
+    if (ok && !this.semConexao()) Utils.mostrarToast(`Apartamento ${apto} removido da lista.`, "sucesso");
   },
 
   /**
@@ -1138,6 +1316,7 @@ const App = {
         numeroTerritorio: edicao.numero,
         pinos: edicao.pinos
       });
+      if (res.enfileirado) return this.avisarGuardadoNoAparelho();
       if (t && !this.haEscritaPendente(chave)) {
         t.quadrasTrabalhadas = Array.isArray(res.quadrasTrabalhadas) ? res.quadrasTrabalhadas : [];
         redesenhar();
