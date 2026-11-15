@@ -361,6 +361,11 @@ function rotearRequisicao(metodo, queryParams, body) {
         if (metodo !== "POST") return erroMetodoNaoPermitido();
         return executarComLock(() => salvarQuadrasTrabalhadasTransacional(usuario, payload), ["PROG"]);
 
+      // Sugestão de cadastro (andares × aptos por andar) por quem está com o cartão; ADMIN aplica direto
+      case "predios/sugerir-cadastro":
+        if (metodo !== "POST") return erroMetodoNaoPermitido();
+        return executarComLock(() => sugerirCadastroPredioTransacional(usuario, payload), ["PROG"]);
+
       // --- DOMÍNIO: MOVIMENTAÇÕES E RELATÓRIOS ---
       case "movimentacoes/minhas":
         return respostaJson({
@@ -394,6 +399,15 @@ function rotearRequisicao(metodo, queryParams, body) {
         if (metodo !== "POST") return erroMetodoNaoPermitido();
         exigirPerfilAdmin(usuario, rota);
         return executarComLock(() => salvarOuAlterarUsuarioAdmin(usuario, payload.dadosUsuario), []);
+
+      case "admin/predios/revisoes":
+        exigirPerfilAdmin(usuario, rota);
+        return respostaJson(Object.assign({ sucesso: true }, listarRevisoesPrediosAdmin(30)));
+
+      case "admin/predios/revisar":
+        if (metodo !== "POST") return erroMetodoNaoPermitido();
+        exigirPerfilAdmin(usuario, rota);
+        return executarComLock(() => revisarCadastroPredioTransacional(usuario, payload), ["PROG"]);
 
       case "admin/auditoria":
         exigirPerfilAdmin(usuario, rota);
@@ -2081,9 +2095,21 @@ function carregarPrediosPorTerritorio(ss, territoriosAtivosSet) {
       longitude: Number(dados[i][10] || 0),
       ultimaDataConclusao: ultimaDataConclusao,
       trabalhadoNesteCiclo: Boolean(ultimaDataConclusao),
-      aptosTrabalhados: normalizarApartamentos(lerListaJson(dados[i][COL_PREDIO_APTOS - 1]))
+      aptosTrabalhados: normalizarApartamentos(lerListaJson(dados[i][COL_PREDIO_APTOS - 1])),
+      aptosPorAndar: Number(dados[i][COL_PREDIO_POR_ANDAR - 1] || 0)
     });
   }
+
+  // Sugestões de cadastro aguardando revisão (só números e data; sem dados do autor)
+  let pendentes = {};
+  try {
+    pendentes = carregarRevisoesPendentesPorPredio(ss);
+  } catch (e) {
+    Logger.log("Aviso ao ler revisões de prédios: " + e.message);
+  }
+  Object.keys(porTerritorio).forEach(num => porTerritorio[num].forEach(p => {
+    p.revisaoPendente = pendentes[p.idPredio] || null;
+  }));
 
   return porTerritorio;
 }
@@ -2456,6 +2482,274 @@ function marcarApartamentosTransacional(usuario, payload) {
   }
 
   return respostaJson({ sucesso: false, codigo: 404, erro: "Prédio não encontrado na base da Congregação Norte." });
+}
+
+/**
+ * ============================================================================
+ * REVISÃO DO CADASTRO DE PRÉDIOS (sugestão → revisão, como um pull request)
+ * ============================================================================
+ * Quem está com o cartão sugere andares e apartamentos por andar de um prédio. A sugestão fica
+ * PENDENTE na aba 'PrediosRevisoes' até um ADMIN aprovar (grava na aba 'Predios') ou recusar.
+ * - Uma sugestão pendente por prédio: a mais nova substitui a anterior (status SUBSTITUIDA).
+ * - Sugestão feita por ADMIN é aplicada na hora e fica registrada como APROVADA.
+ * - A listagem mostra a todos só os números propostos e a data (sem nome nem e-mail do autor).
+ */
+const COL_PREDIO_POR_ANDAR = 14;
+const LIMITE_ANDARES_PREDIO = 60;
+const LIMITE_APTOS_POR_ANDAR = 12;
+const LIMITE_OBS_REVISAO = 200;
+const CABECALHO_REVISOES_PREDIOS = [
+  "IdRevisao", "CriadaEm", "IdPredio", "NumeroTerritorio", "NomeEdificio", "AutorNome", "AutorEmail",
+  "AndaresAntes", "AptosPorAndarAntes", "ApartamentosAntes", "AndaresProposto", "AptosPorAndarProposto",
+  "Observacao", "Status", "RevisorNome", "RevisorEmail", "RevisadaEm", "MotivoRevisao"
+];
+// Índices (base 0) das colunas da aba PrediosRevisoes
+const REV = {
+  ID: 0, CRIADA: 1, PREDIO: 2, TERR: 3, NOME: 4, AUTOR: 5, AUTOR_EMAIL: 6,
+  ANDARES_ANTES: 7, POR_ANDAR_ANTES: 8, APTOS_ANTES: 9, ANDARES: 10, POR_ANDAR: 11,
+  OBS: 12, STATUS: 13, REVISOR: 14, REVISOR_EMAIL: 15, REVISADA: 16, MOTIVO: 17
+};
+
+function obterAbaRevisoesPredios(ss, criarSeAusente) {
+  let sheet = ss.getSheetByName("PrediosRevisoes");
+  if (!sheet && criarSeAusente) {
+    sheet = ss.insertSheet("PrediosRevisoes");
+    sheet.appendRow(CABECALHO_REVISOES_PREDIOS);
+  }
+  return sheet;
+}
+
+function inteiroNoIntervalo(valor, min, max) {
+  const n = Number(valor);
+  if (!Number.isFinite(n) || Math.floor(n) !== n || n < min || n > max) return null;
+  return n;
+}
+
+function formatarDataHoraRevisao(valor) {
+  const ts = extrairTimestamp(valor);
+  if (!ts) return "";
+  try {
+    return Utilities.formatDate(new Date(ts), Session.getScriptTimeZone(), "yyyy-MM-dd HH:mm");
+  } catch (e) {
+    return new Date(ts).toISOString().slice(0, 16).replace("T", " ");
+  }
+}
+
+/** Sugestões PENDENTES por prédio (a mais recente), sem dados do autor: { idPredio: {...} }. */
+function carregarRevisoesPendentesPorPredio(ss) {
+  const sheet = obterAbaRevisoesPredios(ss, false);
+  const pendentes = {};
+  if (!sheet) return pendentes;
+  const dados = sheet.getDataRange().getValues();
+  for (let i = 1; i < dados.length; i++) {
+    if (String(dados[i][REV.STATUS] || "") !== "PENDENTE") continue;
+    const idPredio = String(dados[i][REV.PREDIO] || "").trim();
+    if (!idPredio) continue;
+    pendentes[idPredio] = {
+      andares: Number(dados[i][REV.ANDARES] || 0),
+      aptosPorAndar: Number(dados[i][REV.POR_ANDAR] || 0),
+      criadaEm: formatarDataHoraRevisao(dados[i][REV.CRIADA])
+    };
+  }
+  return pendentes;
+}
+
+/** Grava andares, aptos por andar e o total (andares × aptos por andar) na linha do prédio. */
+function aplicarCadastroPredio(sheet, linha, andares, aptosPorAndar) {
+  if (!String(sheet.getRange(1, COL_PREDIO_POR_ANDAR).getValue() || "").trim()) {
+    sheet.getRange(1, COL_PREDIO_POR_ANDAR).setValue("AptosPorAndar");
+  }
+  sheet.getRange(linha, 5, 1, 2).setValues([[andares, andares * aptosPorAndar]]);
+  sheet.getRange(linha, COL_PREDIO_POR_ANDAR).setValue(aptosPorAndar);
+}
+
+function sugerirCadastroPredioTransacional(usuario, payload) {
+  const idPredio = String((payload && payload.idPredio) || "").trim();
+  const numTerr = String((payload && payload.numeroTerritorio) || "").trim().replace(/^0+/, "");
+  if (!idPredio || !numTerr) {
+    return respostaJson({ sucesso: false, codigo: 400, erro: "Identificador do prédio e território são obrigatórios." });
+  }
+  const andares = inteiroNoIntervalo(payload.andares, 1, LIMITE_ANDARES_PREDIO);
+  const aptosPorAndar = inteiroNoIntervalo(payload.aptosPorAndar, 1, LIMITE_APTOS_POR_ANDAR);
+  if (andares === null || aptosPorAndar === null) {
+    return respostaJson({
+      sucesso: false,
+      codigo: 400,
+      erro: `Informe andares (1 a ${LIMITE_ANDARES_PREDIO}) e apartamentos por andar (1 a ${LIMITE_APTOS_POR_ANDAR}).`
+    });
+  }
+  const observacao = String((payload && payload.observacao) || "").replace(/\s+/g, " ").trim().slice(0, LIMITE_OBS_REVISAO);
+
+  const validacao = validarPosseParaProgresso(usuario, numTerr);
+  if (validacao.erro) return validacao.erro;
+
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheet = inicializarOuObterAbaPredios(ss);
+  const dados = sheet.getDataRange().getValues();
+  let linha = -1;
+  for (let i = 1; i < dados.length; i++) {
+    if (String(dados[i][0] || "").trim() === idPredio) { linha = i; break; }
+  }
+  if (linha < 0) {
+    return respostaJson({ sucesso: false, codigo: 404, erro: "Prédio não encontrado na base da Congregação Norte." });
+  }
+  if (String(dados[linha][1] || "").trim().replace(/^0+/, "") !== numTerr) {
+    return respostaJson({ sucesso: false, codigo: 403, erro: "Este prédio não pertence ao território informado." });
+  }
+
+  const antes = {
+    andares: Number(dados[linha][4] || 0),
+    apartamentos: Number(dados[linha][5] || 0),
+    aptosPorAndar: Number(dados[linha][COL_PREDIO_POR_ANDAR - 1] || 0)
+  };
+  if (antes.andares === andares && antes.aptosPorAndar === aptosPorAndar && antes.apartamentos === andares * aptosPorAndar) {
+    return respostaJson({ sucesso: false, codigo: 409, erro: "O cadastro deste prédio já tem esses números." });
+  }
+
+  const ehAdmin = usuario.perfil === "ADMIN";
+  const abaRev = obterAbaRevisoesPredios(ss, true);
+  const revs = abaRev.getDataRange().getValues();
+  // Uma sugestão pendente por prédio: a nova substitui as anteriores
+  for (let i = 1; i < revs.length; i++) {
+    if (String(revs[i][REV.PREDIO] || "").trim() === idPredio && revs[i][REV.STATUS] === "PENDENTE") {
+      abaRev.getRange(i + 1, REV.STATUS + 1).setValue("SUBSTITUIDA");
+    }
+  }
+
+  const agora = new Date();
+  const idRevisao = "REV-" + Utilities.getUuid().slice(0, 8).toUpperCase();
+  abaRev.appendRow(sanitizarLinha([
+    idRevisao, agora, idPredio, Number(numTerr), String(dados[linha][2] || ""), usuario.nome, usuario.email,
+    antes.andares, antes.aptosPorAndar, antes.apartamentos, andares, aptosPorAndar, observacao,
+    ehAdmin ? "APROVADA" : "PENDENTE",
+    ehAdmin ? usuario.nome : "", ehAdmin ? usuario.email : "", ehAdmin ? agora : "", ehAdmin ? "Aplicada pelo administrador" : ""
+  ], 254));
+
+  if (ehAdmin) aplicarCadastroPredio(sheet, linha + 1, andares, aptosPorAndar);
+  SpreadsheetApp.flush();
+  registrarAuditoria(ehAdmin ? "PREDIO_CADASTRO_ATUALIZADO" : "PREDIO_CADASTRO_SUGERIDO", usuario.nome, usuario.email, numTerr, "SUCESSO",
+    `${idPredio}: ${antes.andares}×${antes.aptosPorAndar || "?"} → ${andares}×${aptosPorAndar} (${idRevisao})`);
+
+  return respostaJson({
+    sucesso: true,
+    idRevisao: idRevisao,
+    aplicada: ehAdmin,
+    idPredio: idPredio,
+    numeroTerritorio: Number(numTerr),
+    andares: andares,
+    aptosPorAndar: aptosPorAndar,
+    mensagem: ehAdmin
+      ? "Cadastro do prédio atualizado."
+      : "Sugestão enviada. Um administrador vai revisar antes de mudar o cadastro."
+  });
+}
+
+/** Para o painel: pendentes (mais antigas primeiro) + últimas decididas, com o cadastro atual. */
+function listarRevisoesPrediosAdmin(limiteDecididas) {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheet = obterAbaRevisoesPredios(ss, false);
+  if (!sheet) return { pendentes: [], decididas: [] };
+  const dados = sheet.getDataRange().getValues();
+
+  const atuais = {};
+  const dadosPredios = inicializarOuObterAbaPredios(ss).getDataRange().getValues();
+  for (let i = 1; i < dadosPredios.length; i++) {
+    const id = String(dadosPredios[i][0] || "").trim();
+    if (id) atuais[id] = {
+      andares: Number(dadosPredios[i][4] || 0),
+      apartamentos: Number(dadosPredios[i][5] || 0),
+      aptosPorAndar: Number(dadosPredios[i][COL_PREDIO_POR_ANDAR - 1] || 0),
+      endereco: String(dadosPredios[i][3] || "")
+    };
+  }
+
+  const pendentes = [];
+  const decididas = [];
+  for (let i = 1; i < dados.length; i++) {
+    const r = dados[i];
+    const idPredio = String(r[REV.PREDIO] || "").trim();
+    const item = {
+      idRevisao: String(r[REV.ID] || ""),
+      criadaEm: formatarDataHoraRevisao(r[REV.CRIADA]),
+      idPredio: idPredio,
+      numeroTerritorio: Number(r[REV.TERR] || 0),
+      nomeEdificio: String(r[REV.NOME] || ""),
+      endereco: atuais[idPredio] ? atuais[idPredio].endereco : "",
+      autor: String(r[REV.AUTOR] || ""),
+      antes: { andares: Number(r[REV.ANDARES_ANTES] || 0), aptosPorAndar: Number(r[REV.POR_ANDAR_ANTES] || 0), apartamentos: Number(r[REV.APTOS_ANTES] || 0) },
+      proposto: { andares: Number(r[REV.ANDARES] || 0), aptosPorAndar: Number(r[REV.POR_ANDAR] || 0) },
+      atual: atuais[idPredio] || null,
+      observacao: String(r[REV.OBS] || ""),
+      status: String(r[REV.STATUS] || ""),
+      revisor: String(r[REV.REVISOR] || ""),
+      revisadaEm: formatarDataHoraRevisao(r[REV.REVISADA]),
+      motivo: String(r[REV.MOTIVO] || "")
+    };
+    item.proposto.apartamentos = item.proposto.andares * item.proposto.aptosPorAndar;
+    // O cadastro mudou desde a sugestão (como um PR desatualizado em relação à main)
+    item.cadastroMudou = Boolean(item.atual && (item.atual.andares !== item.antes.andares ||
+      item.atual.aptosPorAndar !== item.antes.aptosPorAndar || item.atual.apartamentos !== item.antes.apartamentos));
+    if (item.status === "PENDENTE") pendentes.push(item);
+    else if (item.status === "APROVADA" || item.status === "RECUSADA") decididas.push(item);
+  }
+  return { pendentes: pendentes, decididas: decididas.reverse().slice(0, limiteDecididas || 30) };
+}
+
+function revisarCadastroPredioTransacional(usuario, payload) {
+  const idRevisao = String((payload && payload.idRevisao) || "").trim();
+  const decisao = String((payload && payload.decisao) || "").trim().toUpperCase();
+  const motivo = String((payload && payload.motivo) || "").replace(/\s+/g, " ").trim().slice(0, LIMITE_OBS_REVISAO);
+  if (!idRevisao || (decisao !== "APROVAR" && decisao !== "RECUSAR")) {
+    return respostaJson({ sucesso: false, codigo: 400, erro: "Informe a sugestão e a decisão (aprovar ou recusar)." });
+  }
+
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const abaRev = obterAbaRevisoesPredios(ss, false);
+  const revs = abaRev ? abaRev.getDataRange().getValues() : [];
+  let linhaRev = -1;
+  for (let i = 1; i < revs.length; i++) {
+    if (String(revs[i][REV.ID] || "") === idRevisao) { linhaRev = i; break; }
+  }
+  if (linhaRev < 0) return respostaJson({ sucesso: false, codigo: 404, erro: "Sugestão não encontrada." });
+  const rev = revs[linhaRev];
+  if (rev[REV.STATUS] !== "PENDENTE") {
+    return respostaJson({ sucesso: false, codigo: 409, erro: "Esta sugestão já foi revisada ou substituída por outra mais nova." });
+  }
+
+  const idPredio = String(rev[REV.PREDIO] || "").trim();
+  const numTerr = String(rev[REV.TERR] || "");
+  if (decisao === "APROVAR") {
+    const sheet = inicializarOuObterAbaPredios(ss);
+    const dados = sheet.getDataRange().getValues();
+    let linha = -1;
+    for (let i = 1; i < dados.length; i++) {
+      if (String(dados[i][0] || "").trim() === idPredio) { linha = i; break; }
+    }
+    if (linha < 0) return respostaJson({ sucesso: false, codigo: 404, erro: "O prédio desta sugestão não existe mais no cadastro." });
+    const andares = inteiroNoIntervalo(rev[REV.ANDARES], 1, LIMITE_ANDARES_PREDIO);
+    const porAndar = inteiroNoIntervalo(rev[REV.POR_ANDAR], 1, LIMITE_APTOS_POR_ANDAR);
+    if (andares === null || porAndar === null) {
+      return respostaJson({ sucesso: false, codigo: 400, erro: "Os números desta sugestão são inválidos." });
+    }
+    aplicarCadastroPredio(sheet, linha + 1, andares, porAndar);
+  }
+
+  abaRev.getRange(linhaRev + 1, REV.STATUS + 1, 1, 5).setValues([[
+    decisao === "APROVAR" ? "APROVADA" : "RECUSADA",
+    sanitizarCelula(usuario.nome, 120),
+    sanitizarCelula(usuario.email, 254),
+    new Date(),
+    sanitizarCelula(motivo, LIMITE_OBS_REVISAO + 2)
+  ]]);
+  SpreadsheetApp.flush();
+  registrarAuditoria(decisao === "APROVAR" ? "PREDIO_REVISAO_APROVADA" : "PREDIO_REVISAO_RECUSADA",
+    usuario.nome, usuario.email, numTerr, "SUCESSO", `${idPredio} (${idRevisao})${motivo ? ": " + motivo : ""}`);
+
+  return respostaJson({
+    sucesso: true,
+    idRevisao: idRevisao,
+    mensagem: decisao === "APROVAR" ? "Sugestão aprovada: cadastro do prédio atualizado." : "Sugestão recusada."
+  });
 }
 
 const PREDIOS_SEMENTE_NORTE = [
