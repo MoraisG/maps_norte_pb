@@ -297,6 +297,28 @@
       return { idRevisao: rev.idRevisao, mensagem: aprovar ? "Sugestão aprovada: cadastro do prédio atualizado." : "Sugestão recusada." };
     },
 
+    // Casas do interior (spec 07): mesmas regras do backend real
+    "pontos/marcar-visitado": p => {
+      const t = acharTerritorio(p.numeroTerritorio);
+      exigirPosse(t);
+      const ponto = (t.pontosRurais || []).find(x => x.idPonto === p.idPonto);
+      if (!ponto) throw erro(404, "Ponto não encontrado.");
+      ponto.visitadoEm = p.visitado ? hoje() : "";
+      registrar(p.visitado ? "PONTO_VISITADO" : "PONTO_DESMARCADO", t.numero, ponto.idPonto);
+      return { idPonto: ponto.idPonto, numeroTerritorio: t.numero, visitado: Boolean(p.visitado), visitadoEm: ponto.visitadoEm,
+        mensagem: p.visitado ? "Casa marcada como visitada." : "Marcação da casa removida." };
+    },
+
+    "admin/pontos/importar": p => {
+      const lista = Array.isArray(p.pontos) ? p.pontos : [];
+      if (!lista.length) throw erro(400, "Envie ao menos 1 ponto.");
+      const porTerr = {};
+      for (const x of lista) (porTerr[x.terr] = porTerr[x.terr] || []).push({ idPonto: x.id, lat: x.lat, lng: x.lng, domicilios: x.dom || 1, logradouro: x.log || "", localidade: x.loc || "", visitadoEm: "" });
+      for (const t of territorios) { t.pontosRurais = porTerr[t.numero] || []; t.totalPontosRurais = t.pontosRurais.length; t.pontosRuraisVisitados = 0; }
+      registrar("PONTOS_RURAIS_IMPORTADOS", "-", lista.length + " ponto(s)");
+      return { total: lista.length, territorios: Object.keys(porTerr).length, visitasPreservadas: 0, mensagem: lista.length + " ponto(s) importado(s) em " + Object.keys(porTerr).length + " território(s) (simulação)." };
+    },
+
     "quadras/salvar": p => {
       const t = acharTerritorio(p.numeroTerritorio);
       exigirPosse(t);

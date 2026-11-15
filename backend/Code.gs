@@ -361,6 +361,10 @@ function rotearRequisicao(metodo, queryParams, body) {
         if (metodo !== "POST") return erroMetodoNaoPermitido();
         return executarComLock(() => salvarQuadrasTrabalhadasTransacional(usuario, payload), ["PROG"]);
 
+      case "pontos/marcar-visitado":
+        if (metodo !== "POST") return erroMetodoNaoPermitido();
+        return executarComLock(() => marcarPontoVisitadoTransacional(usuario, payload), ["PROG"]);
+
       // Sugestão de cadastro (andares × aptos por andar) por quem está com o cartão; ADMIN aplica direto
       case "predios/sugerir-cadastro":
         if (metodo !== "POST") return erroMetodoNaoPermitido();
@@ -399,6 +403,11 @@ function rotearRequisicao(metodo, queryParams, body) {
         if (metodo !== "POST") return erroMetodoNaoPermitido();
         exigirPerfilAdmin(usuario, rota);
         return executarComLock(() => salvarOuAlterarUsuarioAdmin(usuario, payload.dadosUsuario), []);
+
+      case "admin/pontos/importar":
+        if (metodo !== "POST") return erroMetodoNaoPermitido();
+        exigirPerfilAdmin(usuario, rota);
+        return executarComLock(() => importarPontosRuraisAdmin(usuario, payload), ["PROG"]);
 
       case "admin/predios/revisoes":
         exigirPerfilAdmin(usuario, rota);
@@ -893,9 +902,11 @@ function obterProgressoCampo(fresco, base) {
     // Descarta qualquer prédio fora dos territórios ativos
     predios: carregarPrediosPorTerritorio(ss, numerosAtivos),
     // Alfinetes de quadras já trabalhadas (só existem enquanto o cartão está em campo)
-    quadras: carregarQuadrasPorTerritorio(ss)
+    quadras: carregarQuadrasPorTerritorio(ss),
+    // Casas do interior (spec 07): só vão na projeção de quem está com o cartão ou ADMIN
+    pontos: carregarPontosRuraisPorTerritorio(ss, numerosAtivos)
   };
-  progresso.versao = resumirConteudo(JSON.stringify([progresso.predios, progresso.quadras]));
+  progresso.versao = resumirConteudo(JSON.stringify([progresso.predios, progresso.quadras, progresso.pontos]));
   if (!fresco) gravarConsolidacaoEmCache("PROG", progresso, geracao);
   return progresso;
 }
@@ -1148,6 +1159,9 @@ function projetarTerritoriosParaUsuario(base, progresso, usuarioSolicitante) {
     }));
 
     const listaPredios = predios[String(t.numero)] || [];
+    const listaPontos = ((progresso && progresso.pontos) || {})[String(t.numero)] || [];
+    // LGPD: endereços das casas só para quem está com o cartão (ou ADMIN); os demais veem só a contagem
+    const vePontos = ehAdmin || emMinhaPosse;
 
     return {
       numero: t.numero,
@@ -1165,7 +1179,10 @@ function projetarTerritoriosParaUsuario(base, progresso, usuarioSolicitante) {
       ciclos: ciclosPublicos,
       predios: listaPredios,
       totalPredios: listaPredios.length,
-      quadrasTrabalhadas: ocupado ? (quadras[String(t.numero)] || []) : []
+      quadrasTrabalhadas: ocupado ? (quadras[String(t.numero)] || []) : [],
+      pontosRurais: vePontos ? listaPontos : [],
+      totalPontosRurais: listaPontos.length,
+      pontosRuraisVisitados: listaPontos.filter(p => p.visitadoEm).length
     };
   });
 }
@@ -2218,6 +2235,7 @@ function encerrarCicloPrediosNaDevolucao(ss, numeroTerritorio) {
  */
 function encerrarProgressoNaDevolucao(ss, numeroTerritorio) {
   limparQuadrasDoTerritorio(ss, numeroTerritorio);
+  encerrarCicloPontosNaDevolucao(ss, numeroTerritorio);
   return encerrarCicloPrediosNaDevolucao(ss, numeroTerritorio);
 }
 
@@ -2749,6 +2767,190 @@ function revisarCadastroPredioTransacional(usuario, payload) {
     sucesso: true,
     idRevisao: idRevisao,
     mensagem: decisao === "APROVAR" ? "Sugestão aprovada: cadastro do prédio atualizado." : "Sugestão recusada."
+  });
+}
+
+/**
+ * ============================================================================
+ * PONTOS RURAIS (casas/propriedades do interior) — spec 07, fase 2
+ * ============================================================================
+ * Aba 'PontosRurais': uma linha por ponto (domicílios no mesmo lugar ficam agrupados).
+ * - Dados mínimos (LGPD): posição, logradouro, localidade e quantidade de domicílios.
+ *   Nenhum nome de morador, atividade ou telefone.
+ * - Só quem está com o cartão (ou ADMIN) recebe os pontos na listagem.
+ * - "Visitado" por ponto (data). Na devolução, as marcações ficam para o próximo dirigente até
+ *   todos os pontos do cartão serem visitados; aí o ciclo recomeça (mesma regra dos prédios).
+ * - Carga: o ADMIN importa o JSON gerado por scripts/rurais/importar-pontos-kmz.js pelo painel.
+ */
+const ABA_PONTOS_RURAIS = "PontosRurais";
+const CABECALHO_PONTOS_RURAIS = ["IdPonto", "NumeroTerritorio", "Latitude", "Longitude", "Domicilios", "Logradouro", "Localidade", "VisitadoEm"];
+const COL_PONTO_VISITADO = 8;
+const LIMITE_PONTOS_IMPORTACAO = 6000;
+
+function obterAbaPontosRurais(ss, criarSeAusente) {
+  let sheet = ss.getSheetByName(ABA_PONTOS_RURAIS);
+  if (!sheet && criarSeAusente) {
+    sheet = ss.insertSheet(ABA_PONTOS_RURAIS);
+    sheet.appendRow(CABECALHO_PONTOS_RURAIS);
+  }
+  return sheet;
+}
+
+function formatarDataPonto(valor) {
+  if (!valor) return "";
+  const ts = extrairTimestamp(valor);
+  if (!ts) return String(valor).trim();
+  try {
+    return Utilities.formatDate(new Date(ts), Session.getScriptTimeZone(), "yyyy-MM-dd");
+  } catch (e) {
+    return new Date(ts).toISOString().slice(0, 10);
+  }
+}
+
+/** { numeroTerritorio: [{ idPonto, lat, lng, domicilios, logradouro, localidade, visitadoEm }] } */
+function carregarPontosRuraisPorTerritorio(ss, territoriosAtivosSet) {
+  const porTerritorio = {};
+  const sheet = obterAbaPontosRurais(ss, false);
+  if (!sheet) return porTerritorio;
+  const dados = sheet.getDataRange().getValues();
+  for (let i = 1; i < dados.length; i++) {
+    const idPonto = String(dados[i][0] || "").trim();
+    const numTerr = String(dados[i][1] || "").trim().replace(/^0+/, "");
+    const lat = Number(dados[i][2]), lng = Number(dados[i][3]);
+    if (!idPonto || !numTerr || !isFinite(lat) || !isFinite(lng)) continue;
+    if (territoriosAtivosSet && !territoriosAtivosSet.has(numTerr)) continue;
+    (porTerritorio[numTerr] = porTerritorio[numTerr] || []).push({
+      idPonto: idPonto,
+      lat: lat,
+      lng: lng,
+      domicilios: Math.max(1, Number(dados[i][4]) || 1),
+      logradouro: String(dados[i][5] || "").trim(),
+      localidade: String(dados[i][6] || "").trim(),
+      visitadoEm: formatarDataPonto(dados[i][COL_PONTO_VISITADO - 1])
+    });
+  }
+  return porTerritorio;
+}
+
+function marcarPontoVisitadoTransacional(usuario, payload) {
+  const idPonto = String((payload && payload.idPonto) || "").trim();
+  const numTerr = String((payload && payload.numeroTerritorio) || "").trim().replace(/^0+/, "");
+  const visitado = Boolean(payload && payload.visitado);
+  if (!idPonto || !numTerr) {
+    return respostaJson({ sucesso: false, codigo: 400, erro: "Identificador do ponto e território são obrigatórios." });
+  }
+  const validacao = validarPosseParaProgresso(usuario, numTerr);
+  if (validacao.erro) return validacao.erro;
+
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheet = obterAbaPontosRurais(ss, false);
+  const dados = sheet ? sheet.getDataRange().getValues() : [];
+  for (let i = 1; i < dados.length; i++) {
+    if (String(dados[i][0] || "").trim() !== idPonto) continue;
+    if (String(dados[i][1] || "").trim().replace(/^0+/, "") !== numTerr) {
+      return respostaJson({ sucesso: false, codigo: 403, erro: "Este ponto não pertence ao território informado." });
+    }
+    const hoje = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "yyyy-MM-dd");
+    sheet.getRange(i + 1, COL_PONTO_VISITADO).setValue(visitado ? hoje : "");
+    SpreadsheetApp.flush();
+    registrarAuditoria(visitado ? "PONTO_VISITADO" : "PONTO_DESMARCADO", usuario.nome, usuario.email, numTerr, "SUCESSO", idPonto);
+    return respostaJson({
+      sucesso: true,
+      idPonto: idPonto,
+      numeroTerritorio: Number(numTerr),
+      visitado: visitado,
+      visitadoEm: visitado ? hoje : "",
+      mensagem: visitado ? "Casa marcada como visitada." : "Marcação da casa removida."
+    });
+  }
+  return respostaJson({ sucesso: false, codigo: 404, erro: "Ponto não encontrado." });
+}
+
+/** Na devolução: se todos os pontos do cartão foram visitados, recomeça o ciclo. */
+function encerrarCicloPontosNaDevolucao(ss, numeroTerritorio) {
+  const resumo = { totalPontos: 0, pontosVisitados: 0, cicloPontosCompleto: false };
+  try {
+    const numAlvo = String(numeroTerritorio || "").trim().replace(/^0+/, "");
+    const sheet = obterAbaPontosRurais(ss, false);
+    if (!sheet) return resumo;
+    const dados = sheet.getDataRange().getValues();
+    const linhas = [];
+    for (let i = 1; i < dados.length; i++) {
+      if (String(dados[i][1] || "").trim().replace(/^0+/, "") !== numAlvo || !String(dados[i][0] || "").trim()) continue;
+      linhas.push(i + 1);
+      resumo.totalPontos++;
+      if (dados[i][COL_PONTO_VISITADO - 1]) resumo.pontosVisitados++;
+    }
+    resumo.cicloPontosCompleto = resumo.totalPontos > 0 && resumo.pontosVisitados === resumo.totalPontos;
+    if (resumo.cicloPontosCompleto) {
+      for (const linha of linhas) sheet.getRange(linha, COL_PONTO_VISITADO).setValue("");
+    }
+  } catch (e) {
+    Logger.log("Aviso ao encerrar ciclo de pontos rurais: " + e.message);
+  }
+  return resumo;
+}
+
+/** Valida um ponto vindo da importação; devolve a linha da planilha ou null. */
+function normalizarPontoImportado(p, ativos) {
+  if (!p || typeof p !== "object") return null;
+  const id = String(p.id || "").trim().toUpperCase();
+  const terr = String(p.terr || "").trim().replace(/^0+/, "");
+  const lat = Number(p.lat), lng = Number(p.lng), dom = Number(p.dom || 1);
+  if (!/^PR[0-9A-Z]{4,12}$/.test(id) || !terr || (ativos && !ativos.has(terr))) return null;
+  // Região da congregação (sudoeste do Paraná), com folga
+  if (!(lat > -27 && lat < -25 && lng > -54 && lng < -51)) return null;
+  if (!Number.isInteger(dom) || dom < 1 || dom > 99) return null;
+  const texto = v => sanitizarCelula(String(v || "").replace(/\s+/g, " ").trim().slice(0, 80), 82);
+  return [id, Number(terr), Math.round(lat * 1e6) / 1e6, Math.round(lng * 1e6) / 1e6, dom, texto(p.log), texto(p.loc), ""];
+}
+
+/**
+ * Substitui a aba PontosRurais pelos pontos enviados, preservando "VisitadoEm" dos pontos
+ * que continuam (mesmo IdPonto). Recusa tudo se algum ponto for inválido.
+ */
+function importarPontosRuraisAdmin(usuario, payload) {
+  const lista = payload && payload.pontos;
+  if (!Array.isArray(lista) || !lista.length || lista.length > LIMITE_PONTOS_IMPORTACAO) {
+    return respostaJson({ sucesso: false, codigo: 400, erro: `Envie de 1 a ${LIMITE_PONTOS_IMPORTACAO} pontos.` });
+  }
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const ativos = new Set(listarTodosTerritoriosConsolidados(usuario).map(t => String(t.numero)));
+
+  const linhas = [];
+  const ids = {};
+  for (let i = 0; i < lista.length; i++) {
+    const linha = normalizarPontoImportado(lista[i], ativos);
+    if (!linha) return respostaJson({ sucesso: false, codigo: 400, erro: `Ponto inválido na posição ${i + 1} (identificador, território, coordenadas ou domicílios).` });
+    if (ids[linha[0]]) return respostaJson({ sucesso: false, codigo: 400, erro: `Identificador repetido: ${linha[0]}.` });
+    ids[linha[0]] = true;
+    linhas.push(linha);
+  }
+
+  const sheet = obterAbaPontosRurais(ss, true);
+  const anteriores = {};
+  const dados = sheet.getDataRange().getValues();
+  for (let i = 1; i < dados.length; i++) {
+    const id = String(dados[i][0] || "").trim();
+    if (id && dados[i][COL_PONTO_VISITADO - 1]) anteriores[id] = dados[i][COL_PONTO_VISITADO - 1];
+  }
+  let preservados = 0;
+  for (const linha of linhas) {
+    if (anteriores[linha[0]]) { linha[COL_PONTO_VISITADO - 1] = anteriores[linha[0]]; preservados++; }
+  }
+
+  sheet.clearContents();
+  sheet.getRange(1, 1, linhas.length + 1, CABECALHO_PONTOS_RURAIS.length).setValues([CABECALHO_PONTOS_RURAIS].concat(linhas));
+  SpreadsheetApp.flush();
+  const territorios = Object.keys(linhas.reduce((m, l) => { m[l[1]] = 1; return m; }, {})).length;
+  registrarAuditoria("PONTOS_RURAIS_IMPORTADOS", usuario.nome, usuario.email, "-", "SUCESSO",
+    `${linhas.length} ponto(s) em ${territorios} território(s); ${preservados} visita(s) preservada(s)`);
+  return respostaJson({
+    sucesso: true,
+    total: linhas.length,
+    territorios: territorios,
+    visitasPreservadas: preservados,
+    mensagem: `${linhas.length} ponto(s) importado(s) em ${territorios} território(s).`
   });
 }
 

@@ -142,7 +142,7 @@ const App = {
     if (!this.usuarioAtual) return;
     const itens = await FilaEscrita.listarRecusados(this.usuarioAtual.email);
     if (!itens.length) return;
-    const nomes = { "predios/marcar-trabalhado": "Prédio trabalhado", "predios/marcar-apartamentos": "Apartamentos trabalhados", "quadras/salvar": "Quadras trabalhadas" };
+    const nomes = { "predios/marcar-trabalhado": "Prédio trabalhado", "predios/marcar-apartamentos": "Apartamentos trabalhados", "quadras/salvar": "Quadras trabalhadas", "pontos/marcar-visitado": "Casa visitada" };
     const linhas = itens.map(i => {
       const territorio = i.payload && i.payload.numeroTerritorio ? ` — Território ${Number(i.payload.numeroTerritorio)}` : "";
       return `<li><strong>${Utils.escapeHtml(nomes[i.rota] || i.rota)}${Utils.escapeHtml(territorio)}</strong><br>${Utils.escapeHtml(i.recusado.motivo)}</li>`;
@@ -1190,6 +1190,74 @@ const App = {
     }
   },
 
+  acharPonto(numeroTerritorio, idPonto) {
+    const t = this.territorios.find(item => Number(item.numero) === Number(numeroTerritorio));
+    return t && Array.isArray(t.pontosRurais) ? t.pontosRurais.find(p => p.idPonto === idPonto) || null : null;
+  },
+
+  /** Casa do interior visitada (ou desfeita): tela na hora, servidor depois; sem rede vai para a fila. */
+  async acaoAlternarPontoVisitado(idPonto, numeroTerritorio, visitado) {
+    const chave = `ponto:${idPonto}`;
+    const p = this.acharPonto(numeroTerritorio, idPonto);
+    const anterior = p ? p.visitadoEm : "";
+    const t = this.territorios.find(item => Number(item.numero) === Number(numeroTerritorio));
+    const redesenhar = () => {
+      if (MapaTerritorios.modalMap) MapaTerritorios.modalMap.closePopup();
+      if (t && MapaTerritorios.territorioModalAtual === Number(numeroTerritorio)) MapaTerritorios.renderizarPontosRuraisModal(t);
+      this.renderizarMeusTerritorios();
+    };
+    if (p) {
+      p.visitadoEm = visitado ? this.dataDeHojeIso() : "";
+      redesenhar();
+      this.agendarSalvarRetrato();
+    }
+    try {
+      const res = await this.enviarProgresso(chave, "pontos/marcar-visitado", { idPonto, numeroTerritorio: Number(numeroTerritorio), visitado: Boolean(visitado) });
+      if (res.enfileirado) return this.avisarGuardadoNoAparelho();
+      if (p && !this.haEscritaPendente(chave) && p.visitadoEm !== (res.visitadoEm || "")) {
+        p.visitadoEm = res.visitadoEm || "";
+        redesenhar();
+        this.agendarSalvarRetrato();
+      }
+      Utils.mostrarToast(res.mensagem, "sucesso");
+    } catch (err) {
+      if (p && !this.haEscritaPendente(chave)) {
+        p.visitadoEm = anterior;
+        redesenhar();
+        this.agendarSalvarRetrato();
+      }
+      Utils.mostrarToast(err.message, "erro");
+    }
+  },
+
+  /** Painel admin: envia o JSON gerado por scripts/rurais/importar-pontos-kmz.js. */
+  async acaoImportarPontosRurais() {
+    const entrada = document.getElementById("arquivo-pontos-rurais");
+    const status = document.getElementById("status-pontos-rurais");
+    const arquivo = entrada && entrada.files && entrada.files[0];
+    const avisar = (msg, erro) => { if (status) { status.textContent = msg; status.className = erro ? "text-[11px] text-[#b3261e]" : "text-[11px] text-slate-600"; } };
+    if (!arquivo) return avisar("Escolha o arquivo .json gerado pelo script de importação.", true);
+    let dados;
+    try {
+      dados = JSON.parse(await arquivo.text());
+    } catch (e) {
+      return avisar("Arquivo inválido: não é um JSON.", true);
+    }
+    if (!dados || dados.tipo !== "pontos-rurais" || !Array.isArray(dados.pontos)) {
+      return avisar("Este arquivo não é uma exportação de casas rurais (scripts/rurais/importar-pontos-kmz.js).", true);
+    }
+    avisar(`Enviando ${dados.pontos.length} ponto(s)…`);
+    try {
+      const res = await ApiClient.request("admin/pontos/importar", { pontos: dados.pontos });
+      avisar(`${res.mensagem} Visitas preservadas: ${res.visitasPreservadas || 0}.`);
+      Utils.mostrarToast(res.mensagem, "sucesso");
+      if (entrada) entrada.value = "";
+      this.sincronizarDados({ silencioso: true });
+    } catch (err) {
+      avisar(err.message, true);
+    }
+  },
+
   acharPredio(numeroTerritorio, idPredio) {
     const t = this.territorios.find(item => Number(item.numero) === Number(numeroTerritorio));
     return t && Array.isArray(t.predios) ? t.predios.find(item => item.idPredio === idPredio) || null : null;
@@ -2112,6 +2180,8 @@ const ACOES_UI = {
   "abrir-predios": el => ModalPredios.abrir(Number(el.dataset.num)),
   "alternar-apto": el => ModalPredios.alternarApto(el.dataset.idPredio, Number(el.dataset.num), el.dataset.apto),
   "predios-filtro": el => ModalPredios.definirFiltro(el.dataset.filtro),
+  "ponto-visitado": el => App.acaoAlternarPontoVisitado(el.dataset.idPonto, Number(el.dataset.num), el.dataset.visitado === "true"),
+  "importar-pontos-rurais": () => App.acaoImportarPontosRurais(),
   "predio-cadastro-editar": el => ModalPredios.abrirEdicaoCadastro(el.dataset.idPredio),
   "predio-cadastro-cancelar": () => ModalPredios.cancelarEdicaoCadastro(),
   "predio-cadastro-enviar": el => ModalPredios.enviarCadastro(el.dataset.idPredio, Number(el.dataset.num)),
