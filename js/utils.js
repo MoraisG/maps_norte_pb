@@ -241,6 +241,31 @@ const Utils = {
     });
   },
 
+  /**
+   * Sinaliza "ocupado" em um botão enquanto uma ação assíncrona não termina: spinner (CSS),
+   * aria-busy e trava contra clique duplo (data-ocupado, conferido antes de disparar a ação).
+   * Não mexe em `disabled`: várias telas ligam/desligam esse atributo por conta própria.
+   * Aceita qualquer retorno; só age quando é uma Promise.
+   */
+  sinalizarOcupado(el, resultado) {
+    if (!el || !resultado || typeof resultado.then !== "function") return resultado;
+    el.dataset.ocupado = "1";
+    el.setAttribute("aria-busy", "true");
+    el.classList.add("acao-ocupada");
+    const liberar = () => {
+      delete el.dataset.ocupado;
+      el.removeAttribute("aria-busy");
+      el.classList.remove("acao-ocupada");
+    };
+    resultado.then(liberar, liberar);
+    return resultado;
+  },
+
+  /** true quando o elemento já tem uma ação assíncrona em andamento (clique repetido deve ser ignorado). */
+  estaOcupado(el) {
+    return Boolean(el && el.dataset && el.dataset.ocupado === "1");
+  },
+
   mostrarToast(mensagem, tipo = "sucesso") {
     const el = document.getElementById("app-toast");
     if (!el) return;

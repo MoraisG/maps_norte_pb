@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <!-- Versão "maskable": fundo até a borda e desenho reduzido para caber na área segura (círculo central de 80%) -->
+  <rect width="512" height="512" fill="#1e1b4b"/>
+  <g transform="translate(256 256) scale(0.72) translate(-256 -256)">
+    <path d="M192 400l-112-56V128l112 56m0 216l128-64m-128 64V184m128 152l112 56V176l-112-56m0 216V120m0 0L192 184" fill="none" stroke="#818cf8" stroke-width="32" stroke-linecap="round" stroke-linejoin="round"/>
+    <circle cx="320" cy="210" r="36" fill="#34d399"/>
+  </g>
+</svg>
