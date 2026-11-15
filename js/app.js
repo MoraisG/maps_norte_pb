@@ -2176,6 +2176,7 @@ const ACOES_UI = {
   "filtrar-dirigente": el => App.filtrarDashboardPorDirigente(el.dataset.dirigente || ""),
   "alternar-predio": el => App.acaoAlternarPredioTrabalhado(el.dataset.idPredio, Number(el.dataset.num), el.dataset.trabalhado === "true"),
   "focar-predio": el => MapaTerritorios.focarPredioNoModal(el.dataset.idPredio),
+  "mapa-aba": el => MapaTerritorios.definirAbaModal(el.dataset.aba),
   "adicionar-aptos": el => App.acaoAdicionarApartamentos(el.dataset.idPredio, Number(el.dataset.num), el),
   "abrir-predios": el => ModalPredios.abrir(Number(el.dataset.num)),
   "alternar-apto": el => ModalPredios.alternarApto(el.dataset.idPredio, Number(el.dataset.num), el.dataset.apto),

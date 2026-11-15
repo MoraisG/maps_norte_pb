@@ -308,7 +308,7 @@ const ModalM3 = {
     if (!content) {
       content = document.createElement("div");
       content.id = "modal-m3-content";
-      content.className = "m3-dialog-surface w-full max-w-md overflow-hidden";
+      content.className = "m3-dialog-surface modal-janela w-full max-w-md overflow-y-auto";
       container.appendChild(content);
       container.addEventListener("click", e => {
         if (e.target === container) this.fechar(null);
