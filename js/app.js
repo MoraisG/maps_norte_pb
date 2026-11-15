@@ -595,6 +595,7 @@ const App = {
     }
 
     this.atualizarIndicadores();
+    this.atualizarContagemRevisoes();
     this.renderizarCardsTerritorios();
     this.renderizarMeusTerritorios();
     this.renderizarDashboardOcupacao();
@@ -1468,7 +1469,8 @@ const App = {
     try {
       const [resUsers, resAudit] = await Promise.all([
         ApiClient.request("admin/usuarios/listar"),
-        ApiClient.request("admin/auditoria")
+        ApiClient.request("admin/auditoria"),
+        this.carregarRevisoesPredios()
       ]);
 
       this.usuariosAdmin = resUsers.usuarios || [];
@@ -1516,6 +1518,94 @@ const App = {
     } catch (err) {
       Utils.mostrarToast(err.message, "erro");
     }
+  },
+
+  /**
+   * Revisões de cadastro de prédios (como pull requests): pendentes com antes → depois e
+   * Aprovar/Recusar; as decididas ficam em "Revisões recentes".
+   */
+  async carregarRevisoesPredios() {
+    const lista = document.getElementById("lista-revisoes-predios");
+    if (!lista) return;
+    try {
+      const res = await ApiClient.request("admin/predios/revisoes");
+      const pendentes = res.pendentes || [];
+      document.getElementById("count-revisoes-predios").textContent = pendentes.length;
+      this.definirContagemRevisoes(pendentes.length);
+      const n = v => (Number(v) > 0 ? String(Number(v)) : "—");
+      const diff = (rotulo, antes, depois) => {
+        const mudou = n(antes) !== n(depois);
+        return `<span class="rv-diff ${mudou ? "mudou" : ""}">${rotulo}: <s>${n(antes)}</s> → <b>${n(depois)}</b></span>`;
+      };
+      lista.innerHTML = pendentes.length ? pendentes.map(r => `
+        <article class="rv-item">
+          <div class="rv-topo">
+            <div>
+              <p class="rv-titulo">${Utils.escapeHtml(r.nomeEdificio)} <span>• Território ${Number(r.numeroTerritorio)} • ${Utils.escapeHtml(r.idPredio)}</span></p>
+              <p class="rv-meta">${Utils.escapeHtml(r.endereco)}${r.endereco ? " • " : ""}sugerido por ${Utils.escapeHtml(r.autor)} em ${Utils.escapeHtml(r.criadaEm)}</p>
+            </div>
+          </div>
+          <div class="rv-diffs">
+            ${diff("Andares", r.antes.andares, r.proposto.andares)}
+            ${diff("Aptos por andar", r.antes.aptosPorAndar, r.proposto.aptosPorAndar)}
+            ${diff("Total", r.antes.apartamentos, r.proposto.apartamentos)}
+          </div>
+          ${r.observacao ? `<p class="rv-obs">“${Utils.escapeHtml(r.observacao)}”</p>` : ""}
+          ${r.cadastroMudou && r.atual ? `<p class="rv-alerta">⚠️ O cadastro mudou depois desta sugestão (hoje: ${n(r.atual.andares)} andares, ${n(r.atual.aptosPorAndar)} por andar, ${n(r.atual.apartamentos)} no total).</p>` : ""}
+          <div class="rv-acoes">
+            <input type="text" maxlength="200" data-revisao-motivo="${Utils.escapeHtml(r.idRevisao)}" placeholder="Comentário (opcional; aparece no histórico)" />
+            <button type="button" data-acao="revisao-decidir" data-id-revisao="${Utils.escapeHtml(r.idRevisao)}" data-decisao="APROVAR" class="rv-aprovar">✓ Aprovar</button>
+            <button type="button" data-acao="revisao-decidir" data-id-revisao="${Utils.escapeHtml(r.idRevisao)}" data-decisao="RECUSAR" class="rv-recusar">Recusar</button>
+          </div>
+        </article>`).join("")
+        : `<p class="p-4 text-xs text-slate-500">Nenhuma sugestão aguardando revisão.</p>`;
+
+      const decididas = res.decididas || [];
+      document.getElementById("lista-revisoes-predios-decididas").innerHTML = decididas.length ? decididas.map(r => `
+        <p class="rv-historico">
+          <span class="rv-status ${r.status === "APROVADA" ? "ok" : "nao"}">${r.status === "APROVADA" ? "Aprovada" : "Recusada"}</span>
+          ${Utils.escapeHtml(r.nomeEdificio)} (T-${Number(r.numeroTerritorio)}): ${n(r.proposto.andares)} × ${n(r.proposto.aptosPorAndar)}
+          • ${Utils.escapeHtml(r.autor)} → ${Utils.escapeHtml(r.revisor)} em ${Utils.escapeHtml(r.revisadaEm)}${r.motivo ? ` • “${Utils.escapeHtml(r.motivo)}”` : ""}
+        </p>`).join("")
+        : `<p class="p-4 text-xs text-slate-500">Nenhuma revisão ainda.</p>`;
+    } catch (err) {
+      lista.innerHTML = `<p class="p-4 text-xs text-[#b3261e]">${Utils.escapeHtml(err.message)}</p>`;
+    }
+  },
+
+  async acaoRevisarCadastroPredio(idRevisao, decisao) {
+    const campo = document.querySelector(`input[data-revisao-motivo="${CSS.escape(idRevisao)}"]`);
+    try {
+      const res = await ApiClient.request("admin/predios/revisar", { idRevisao, decisao, motivo: campo ? campo.value : "" });
+      Utils.mostrarToast(res.mensagem || "Revisão registrada.", "sucesso");
+    } catch (err) {
+      Utils.mostrarToast(err.message, "erro");
+    }
+    await this.carregarRevisoesPredios();
+    if (decisao === "APROVAR") this.sincronizarDados({ silencioso: true });
+  },
+
+  /** Selo no botão do painel admin com o número de sugestões pendentes. */
+  definirContagemRevisoes(qtd) {
+    const nav = document.getElementById("nav-btn-admin");
+    if (!nav) return;
+    let selo = nav.querySelector(".selo-revisoes");
+    if (!qtd) { if (selo) selo.remove(); return; }
+    if (!selo) {
+      selo = document.createElement("span");
+      selo.className = "selo-revisoes";
+      nav.appendChild(selo);
+    }
+    selo.textContent = String(qtd);
+    selo.title = `${qtd} sugestão(ões) de cadastro de prédio aguardando revisão`;
+  },
+
+  /** Conta as sugestões pendentes a partir da listagem (para o selo do ADMIN). */
+  atualizarContagemRevisoes() {
+    if (!this.usuarioAtual || this.usuarioAtual.perfil !== "ADMIN") return;
+    let qtd = 0;
+    for (const t of this.territorios || []) for (const p of t.predios || []) if (p.revisaoPendente) qtd++;
+    this.definirContagemRevisoes(qtd);
   },
 
   preencherFormUsuario(idx) {
@@ -2022,6 +2112,10 @@ const ACOES_UI = {
   "abrir-predios": el => ModalPredios.abrir(Number(el.dataset.num)),
   "alternar-apto": el => ModalPredios.alternarApto(el.dataset.idPredio, Number(el.dataset.num), el.dataset.apto),
   "predios-filtro": el => ModalPredios.definirFiltro(el.dataset.filtro),
+  "predio-cadastro-editar": el => ModalPredios.abrirEdicaoCadastro(el.dataset.idPredio),
+  "predio-cadastro-cancelar": () => ModalPredios.cancelarEdicaoCadastro(),
+  "predio-cadastro-enviar": el => ModalPredios.enviarCadastro(el.dataset.idPredio, Number(el.dataset.num)),
+  "revisao-decidir": el => App.acaoRevisarCadastroPredio(el.dataset.idRevisao, el.dataset.decisao),
   "predios-ver-mapa": el => { ModalPredios.fechar(); MapaTerritorios.abrirModalTerritorio(Number(el.dataset.num)); },
   "remover-apto": el => App.acaoRemoverApartamento(el.dataset.idPredio, Number(el.dataset.num), el.dataset.apto),
   "marcar-quadras": el => App.acaoMarcarQuadras(Number(el.dataset.num)),
