@@ -21,3 +21,9 @@ scripts/quadras/.cache/
 
 # Configuração local do modo de desenvolvimento (contém a chave de mapas da Esri)
 scripts/dev/config.local.json
+
+# Dados geográficos com localização de residências (LGPD, spec 07) — nunca versionar
+# (ex.: exportações do Google My Maps / Google Earth)
+kml/
+*.kmz
+*.kml

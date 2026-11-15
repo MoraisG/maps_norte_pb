@@ -76,6 +76,10 @@ jobs:
           if git ls-files | grep -Ei '(^|/)(\.env|\.clasprc\.json|\.clasp\.json|client_secret[^/]*\.json|[^/]*service-account[^/]*\.json|[^/]*credentials[^/]*\.json)$'; then
             echo "::error::Arquivo de credencial versionado (lista acima)."; falhou=1
           fi
+          # KML/KMZ podem conter a localização de residências (LGPD, spec 07)
+          if git ls-files | grep -Ei '(^|/)kml/|\.(kml|kmz)$'; then
+            echo "::error::Arquivo KML/KMZ (ou pasta kml/) versionado — dados geográficos pessoais não podem ir para o repositório público."; falhou=1
+          fi
           # Padrões de conteúdo sensível
           padroes='refresh_token"[[:space:]]*:|"client_secret"[[:space:]]*:|-----BEGIN [A-Z ]*PRIVATE KEY-----|DIAG_[a-f0-9]{32,}|ya29\.[A-Za-z0-9_-]{20,}|GOCSPX-[A-Za-z0-9_-]{10,}'
           if git grep -nE "$padroes" -- . ':!tests/*' ':!.github/workflows/pr-checks.yml'; then
