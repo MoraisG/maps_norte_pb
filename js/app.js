@@ -36,6 +36,11 @@ const App = {
       this.sairParaTelaLogin("Sua sessão expirou. Por favor, entre novamente com sua conta Google.");
     });
 
+    // Pacotes offline já baixados neste aparelho (para o selo nos cartões e a barra do mapa)
+    PacoteOffline.iniciar().then(() => {
+      if (this.territorios.length) this.renderizarMeusTerritorios();
+    }).catch(() => {});
+
     // Conexão e fila de escritas pendentes
     FilaEscrita.definirOuvinte(() => this.atualizarFaixasConexao());
     window.addEventListener("online", () => this.aoVoltarConexao());
@@ -383,6 +388,7 @@ const App = {
       if (await Armazenamento.definirDono(usuario.email)) {
         this.territorios = [];
         this._versaoListagem = "";
+        await PacoteOffline.removerTodos();
       }
       const [retrato, geometria] = await Promise.all([Armazenamento.ler("retrato"), Armazenamento.ler("geometria")]);
       // O usuário pode ter saído enquanto o banco local respondia
@@ -466,6 +472,7 @@ const App = {
     this.modoLocal = false;
     // Logout explícito apaga tudo o que foi guardado neste aparelho
     clearTimeout(this._temporizadorRetrato);
+    await PacoteOffline.removerTodos();
     await Armazenamento.limparTudo();
     this.territorios = [];
     this._geometria = { versao: "", wkts: {} };
@@ -546,7 +553,11 @@ const App = {
         versaoGeometria: this._geometria.versao || ""
       });
       // Configuração entregue só a usuários autenticados (ex.: chave de mapas da Esri)
-      if (res.config) MapaTerritorios.definirChaveEsri(res.config.chaveEsri);
+      if (res.config) {
+        MapaTerritorios.definirChaveEsri(res.config.chaveEsri);
+        PacoteOffline.definirPermitido(res.config.offlineSatelite);
+        if (MapaTerritorios.territorioModalAtual) MapaTerritorios.renderizarBarraOffline();
+      }
 
       if (res.naoModificado) {
         if (!silencioso) Utils.mostrarToast("Tudo atualizado: nenhuma mudança desde a última sincronização.", "sucesso");
@@ -880,7 +891,7 @@ const App = {
       const qtdQuadras = Array.isArray(t.quadrasTrabalhadas) ? t.quadrasTrabalhadas.length : 0;
       infoQuadras = `
         <div class="mt-2 px-3 py-2 rounded-xl bg-[#f4f8ff] border border-[#d3e3fd] flex items-center justify-between gap-2">
-          <span class="text-[11px] text-slate-700">📍 ${qtdQuadras ? `<strong>${qtdQuadras}</strong> quadra(s) trabalhada(s)` : "Nenhuma quadra marcada"}</span>
+          <span class="text-[11px] text-slate-700">📍 ${qtdQuadras ? `<strong>${qtdQuadras}</strong> quadra(s) trabalhada(s)` : "Nenhuma quadra marcada"}${PacoteOffline.tem(num) ? ` <span class="selo-offline" title="Mapa de satélite guardado neste aparelho">✓ mapa offline</span>` : ""}</span>
           <button type="button" data-acao="marcar-quadras" data-num="${num}" class="text-[11px] font-bold text-[#0b57d0] hover:underline shrink-0">
             ${qtdQuadras ? "Editar no mapa →" : "Marcar no mapa →"}
           </button>
@@ -1053,6 +1064,39 @@ const App = {
    *      * Prédios não trabalhados -> Concluído (quarentena 120 dias)
    *      * Não iniciado -> Volta para a fila como DISPONÍVEL sem data de início e sem data de conclusão
    */
+  /**
+   * Baixa as imagens de satélite de um território rural para usar o mapa sem internet.
+   * O andamento aparece na barra do mapa do cartão.
+   */
+  async acaoBaixarPacoteOffline(numero) {
+    if (this.avisarSePrecisaDeConexao("Baixar o mapa")) return;
+    const limites = MapaTerritorios.limitesTerritorio(numero);
+    if (!limites) {
+      Utils.mostrarToast("Este território não tem área desenhada no mapa.", "aviso");
+      return;
+    }
+    const atualizarBarra = () => {
+      if (MapaTerritorios.territorioModalAtual === Number(numero)) MapaTerritorios.renderizarBarraOffline();
+    };
+    try {
+      const r = await PacoteOffline.baixar(numero, limites, MapaTerritorios.modelosSatelite(), atualizarBarra);
+      if (r.cancelado) Utils.mostrarToast("Download cancelado. O que já foi baixado continua guardado.", "aviso");
+      else if (r.falhas) Utils.mostrarToast(`Mapa baixado em parte: ${r.falhas} imagem(ns) não vieram. Toque em "Completar" para tentar de novo.`, "aviso");
+      else Utils.mostrarToast(`Mapa do Território ${Number(numero)} disponível sem internet.`, "sucesso");
+    } catch (err) {
+      Utils.mostrarToast(err.message, "erro");
+    }
+    atualizarBarra();
+    this.renderizarMeusTerritorios();
+  },
+
+  async acaoRemoverPacoteOffline(numero) {
+    await PacoteOffline.remover(numero);
+    if (MapaTerritorios.territorioModalAtual === Number(numero)) MapaTerritorios.renderizarBarraOffline();
+    this.renderizarMeusTerritorios();
+    Utils.mostrarToast("Mapa offline removido deste aparelho.", "sucesso");
+  },
+
   /** Solicitar e devolver dependem da fila no servidor: sem conexão, só avisa. */
   avisarSePrecisaDeConexao(acao) {
     if (!this.semConexao()) return false;
@@ -1076,6 +1120,8 @@ const App = {
         motivoNaoCompleto: decisao.motivoNaoCompleto
       });
       Utils.mostrarToast(res.mensagem, "sucesso");
+      // Cartão devolvido: o mapa offline dele não é mais necessário neste aparelho
+      if (PacoteOffline.tem(numero)) await PacoteOffline.remover(numero);
       await this.sincronizarDados();
     } catch (err) {
       Utils.mostrarToast(err.message, "erro");
@@ -1924,6 +1970,9 @@ const ACOES_UI = {
   "adicionar-aptos": el => App.acaoAdicionarApartamentos(el.dataset.idPredio, Number(el.dataset.num)),
   "remover-apto": el => App.acaoRemoverApartamento(el.dataset.idPredio, Number(el.dataset.num), el.dataset.apto),
   "marcar-quadras": el => App.acaoMarcarQuadras(Number(el.dataset.num)),
+  "offline-baixar": el => App.acaoBaixarPacoteOffline(Number(el.dataset.num)),
+  "offline-cancelar": el => PacoteOffline.cancelar(Number(el.dataset.num)),
+  "offline-remover": el => App.acaoRemoverPacoteOffline(Number(el.dataset.num)),
   "quadras-editar": () => MapaTerritorios.iniciarEdicaoQuadras(),
   "quadras-cancelar": () => MapaTerritorios.cancelarEdicaoQuadras(),
   "quadras-limpar": () => MapaTerritorios.limparEdicaoQuadras(),

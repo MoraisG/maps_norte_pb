@@ -26,8 +26,13 @@ let ok=0; for (let i=0;i<70;i++) if (t.consumirCota("T",60,60)) ok++; assert.str
 // F5
 assert.deepStrictEqual(Object.keys(t.usuarioPublico({id:1,nome:"a",email:"e",perfil:"P",status:"ATIVO",linhaPlanilha:9})).sort(), ["email","id","nome","perfil","status"]);
 // Chave de mapas: vem só da ScriptProperty (nunca do código) e vazia quando não configurada
-assert.deepStrictEqual(Object.keys(t.configClienteAutenticado()), ["chaveEsri"]);
+assert.deepStrictEqual(Object.keys(t.configClienteAutenticado()), ["chaveEsri", "offlineSatelite"]);
 assert.strictEqual(t.configClienteAutenticado().chaveEsri, "");
+// Pacote offline de satélite: desligado até a ScriptProperty ser ligada explicitamente
+assert.strictEqual(t.configClienteAutenticado().offlineSatelite, false);
+store.OFFLINE_SATELITE_PERMITIDO = "true";
+assert.strictEqual(t.configClienteAutenticado().offlineSatelite, true);
+delete store.OFFLINE_SATELITE_PERMITIDO;
 store.ESRI_API_KEY = "  AAPTteste  ";
 assert.strictEqual(t.configClienteAutenticado().chaveEsri, "AAPTteste");
 delete store.ESRI_API_KEY;

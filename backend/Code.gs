@@ -61,7 +61,12 @@ function lerPropriedade(chave, padrao) {
  * repositório e do site público; é restrita por site e só tem o privilégio de mapas-base.
  */
 function configClienteAutenticado() {
-  return { chaveEsri: String(lerPropriedade("ESRI_API_KEY", "") || "").trim() };
+  return {
+    chaveEsri: String(lerPropriedade("ESRI_API_KEY", "") || "").trim(),
+    // Pacote offline de imagens de satélite (Spec 06, fase 5): só é oferecido quando a licença do
+    // provedor de imagens permitir guardar ladrilhos. Ligar com OFFLINE_SATELITE_PERMITIDO = true.
+    offlineSatelite: lerPropriedade("OFFLINE_SATELITE_PERMITIDO", "false") === "true"
+  };
 }
 
 function sanitizarCelula(valor, tamanhoMax) {
