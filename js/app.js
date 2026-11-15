@@ -11,6 +11,8 @@ const App = {
   territorios: [],
   usuariosAdmin: [],
   territoriosSelecionados: new Set(),
+  _versaoListagem: "",                    // versão da última listagem aplicada (devolvida ao servidor em versaoConhecida)
+  _geometria: { versao: "", wkts: {} },   // polígonos por número de território, recebidos à parte da listagem
 
   init() {
     this.registrarServiceWorker();
@@ -249,6 +251,7 @@ const App = {
   sairParaTelaLogin(mensagemErro = "") {
     ApiClient.limparSessaoLocal();
     this.usuarioAtual = null;
+    this._versaoListagem = "";
     this._linkDiretoProcessado = false;
     this.territoriosSelecionados.clear();
     this.atualizarBarraSelecaoFlutuante();
@@ -297,11 +300,30 @@ const App = {
     if (this.sincronizando) return;
     this.sincronizando = true;
     try {
-      const res = await ApiClient.request("territorios/listar");
-      const listaBruta = res.territorios || [];
+      // versaoConhecida: se nada mudou desde a última sincronização, o servidor responde só
+      // "não modificado". geometriaSeparada: os polígonos (wkt) vêm à parte e só quando mudam.
+      const res = await ApiClient.request("territorios/listar", {
+        versaoConhecida: this._versaoListagem || "",
+        geometriaSeparada: true,
+        versaoGeometria: this._geometria.versao || ""
+      });
       // Configuração entregue só a usuários autenticados (ex.: chave de mapas da Esri)
       if (res.config) MapaTerritorios.definirChaveEsri(res.config.chaveEsri);
+
+      if (res.naoModificado) {
+        Utils.mostrarToast("Tudo atualizado: nenhuma mudança desde a última sincronização.", "sucesso");
+        return;
+      }
+
+      if (res.geometria && res.geometria.wkts) {
+        this._geometria = { versao: String(res.geometria.versao || ""), wkts: res.geometria.wkts };
+      }
+      // Recoloca o polígono em cada território (servidor antigo ou simulador já mandam wkt junto)
+      const listaBruta = (res.territorios || []).map(t =>
+        t.wkt === undefined ? Object.assign({}, t, { wkt: this._geometria.wkts[String(t.numero)] || "" }) : t
+      );
       this.aplicarListaTerritoriosServidor(listaBruta);
+      this._versaoListagem = String(res.versao || "");
       Utils.mostrarToast(" Fila e mapas sincronizados!", "sucesso");
     } catch (err) {
       Utils.mostrarToast(err.message, "erro");
@@ -764,6 +786,8 @@ const App = {
       // Tratamento de Concorrência (HTTP 409): outro usuário retirou algum dos territórios da fila de 5
       if (err.codigo === 409) {
         if (Array.isArray(err.territorios)) {
+          // Lista vinda de uma recusa (conflito de fila): a versão guardada deixa de valer
+          this._versaoListagem = "";
           this.aplicarListaTerritoriosServidor(err.territorios);
         } else {
           await this.sincronizarDados();
