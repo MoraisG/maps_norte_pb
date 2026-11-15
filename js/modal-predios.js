@@ -2,9 +2,11 @@
  * Modal dedicada aos prédios de um cartão: o dirigente marca, sem abrir o mapa, quais
  * apartamentos e quais prédios já foram trabalhados.
  *
- * - Grade de apartamentos: quando o cadastro permite (andares e total de unidades divisível pelos
- *   andares), sugere a numeração usual andar + unidade (101, 102... 201...). Um toque marca ou
- *   desmarca. Numerações diferentes são digitadas no campo abaixo da grade.
+ * - Grade de apartamentos: com o número de andares cadastrado, sugere a numeração usual
+ *   andar + unidade (101, 102... 201...). Unidades por andar = total ÷ andares arredondado para
+ *   cima; sem total cadastrado, quem está com o cartão escolhe "Aptos por andar" (a escolha fica
+ *   só neste aparelho, em localStorage). Um toque marca ou desmarca. Numerações diferentes são
+ *   digitadas no campo abaixo da grade.
  * - As marcações usam as mesmas ações do mapa (App.salvarApartamentosPredio e
  *   App.acaoAlternarPredioTrabalhado): mudam a tela na hora e, sem conexão, vão para a fila.
  * - LGPD: só o número da unidade é registrado; nenhum dado de morador.
@@ -14,6 +16,7 @@ const ModalPredios = {
   filtro: "TODOS",            // TODOS | FALTANDO | TRABALHADOS
   MAX_UNIDADES_POR_ANDAR: 12,
   MAX_ANDARES_GRADE: 40,
+  CHAVE_POR_ANDAR: "mp-aptos-por-andar:",
 
   elementos() {
     return {
@@ -80,16 +83,43 @@ const ModalPredios = {
     this.elementos().lista.scrollTop = 0;
   },
 
-  /**
-   * Numeração sugerida por andar (101, 102... 201...). Só quando o total de unidades se divide
-   * igualmente pelos andares; caso contrário devolve null e fica só o campo de digitação.
-   */
-  gradeSugerida(p) {
+  /** Unidades por andar escolhidas neste aparelho para o prédio (0 = nenhuma escolha). */
+  porAndarEscolhido(idPredio) {
+    try {
+      const v = Math.floor(Number(localStorage.getItem(this.CHAVE_POR_ANDAR + idPredio)) || 0);
+      return v >= 1 && v <= this.MAX_UNIDADES_POR_ANDAR ? v : 0;
+    } catch (e) {
+      return 0;
+    }
+  },
+
+  escolherPorAndar(idPredio, valor) {
+    const v = Math.floor(Number(valor) || 0);
+    try {
+      if (v >= 1 && v <= this.MAX_UNIDADES_POR_ANDAR) localStorage.setItem(this.CHAVE_POR_ANDAR + idPredio, String(v));
+      else localStorage.removeItem(this.CHAVE_POR_ANDAR + idPredio);
+    } catch (e) {}
+    this.renderizar();
+  },
+
+  /** Unidades por andar pelo cadastro: total ÷ andares, arredondado para cima (0 = sem dado). */
+  porAndarDoCadastro(p) {
     const andares = Math.floor(Number(p.andares) || 0);
     const total = Math.floor(Number(p.apartamentos) || 0);
-    if (andares < 1 || total < 1 || total % andares !== 0 || andares > this.MAX_ANDARES_GRADE) return null;
-    const porAndar = total / andares;
-    if (porAndar > this.MAX_UNIDADES_POR_ANDAR) return null;
+    if (andares < 1 || total < 1) return 0;
+    return Math.ceil(total / andares);
+  },
+
+  /**
+   * Numeração sugerida por andar (101, 102... 201...). Precisa do número de andares; as unidades
+   * por andar vêm da escolha feita no aparelho ou, sem ela, do cadastro (arredondado para cima).
+   * Sem dado suficiente (ou fora dos limites) devolve null e fica só o campo de digitação.
+   */
+  gradeSugerida(p, porAndarEscolhido) {
+    const andares = Math.floor(Number(p.andares) || 0);
+    if (andares < 1 || andares > this.MAX_ANDARES_GRADE) return null;
+    const porAndar = Math.floor(Number(porAndarEscolhido) || 0) || this.porAndarDoCadastro(p);
+    if (porAndar < 1 || porAndar > this.MAX_UNIDADES_POR_ANDAR) return null;
     const linhas = [];
     for (let andar = andares; andar >= 1; andar--) {   // andar mais alto em cima, como no prédio
       const unidades = [];
@@ -151,7 +181,21 @@ const ModalPredios = {
     const marcados = new Set(aptos);
     const total = Math.floor(Number(p.apartamentos) || 0);
     const { interfoneBadge, metaStr } = Utils.obterBadgesPredio(p);
-    const grade = editar ? this.gradeSugerida(p) : null;
+    const andares = Math.floor(Number(p.andares) || 0);
+    const escolhido = editar ? this.porAndarEscolhido(p.idPredio) : 0;
+    const grade = editar ? this.gradeSugerida(p, escolhido) : null;
+    const porAndarAtual = grade ? grade[0].unidades.length : 0;
+    // Seletor "Aptos por andar": só para quem edita e quando o número de andares permite a grade
+    const seletorHtml = editar && andares >= 1 && andares <= this.MAX_ANDARES_GRADE ? `
+      <label class="mp-por-andar">
+        <span>Aptos por andar</span>
+        <select data-por-andar="${id}" aria-label="Apartamentos por andar em ${Utils.escapeHtml(p.nomeEdificio)}">
+          <option value="">${porAndarAtual ? "Automático" : "Escolher…"}</option>
+          ${Array.from({ length: this.MAX_UNIDADES_POR_ANDAR }, (_, i) => i + 1).map(n =>
+            `<option value="${n}" ${escolhido === n ? "selected" : ""}>${n}</option>`).join("")}
+        </select>
+        ${porAndarAtual && !escolhido ? `<span class="mp-por-andar-info">(${porAndarAtual} pelo cadastro)</span>` : ""}
+      </label>` : "";
     const naGrade = new Set(grade ? grade.flatMap(l => l.unidades) : []);
     const foraDaGrade = aptos.filter(a => !naGrade.has(a));
 
@@ -164,7 +208,7 @@ const ModalPredios = {
                 aria-pressed="${marcados.has(u)}" title="${marcados.has(u) ? `Desmarcar ${u}` : `Marcar ${u} como trabalhado`}"
                 class="mp-apto ${marcados.has(u) ? "marcado" : ""}">${u}</button>`).join("")}
           </div>`).join("")}
-        <p class="mp-dica">Numeração sugerida (andar + unidade). Se no prédio for diferente, digite abaixo.</p>
+        <p class="mp-dica">Numeração sugerida (andar + unidade). Se no prédio for diferente, ajuste "Aptos por andar" ou digite abaixo.</p>
       </div>` : "";
 
     const chips = (grade ? foraDaGrade : aptos).map(a => editar
@@ -177,7 +221,8 @@ const ModalPredios = {
           placeholder="${grade ? "Outros números (ex.: 12B, Cobertura)" : "Ex.: 101, 102, 201"}"
           aria-label="Apartamentos trabalhados em ${Utils.escapeHtml(p.nomeEdificio)}" />
         <button type="button" data-acao="adicionar-aptos" data-num="${num}" data-id-predio="${id}" class="mp-botao">Adicionar</button>
-      </div>` : "";
+      </div>
+      <p class="mp-erro" data-apto-erro="${id}" role="alert" hidden></p>` : "";
 
     const botaoPredio = editar
       ? `<button type="button" data-acao="alternar-predio" data-num="${num}" data-id-predio="${id}" data-trabalhado="${!concluido}" class="mp-botao-predio ${concluido ? "feito" : ""}">
@@ -199,6 +244,7 @@ const ModalPredios = {
           <span class="px-2 py-0.5 text-[10px] font-semibold rounded-full ${interfoneBadge.cls}">${interfoneBadge.texto}</span>
           <span class="mp-progresso">🚪 ${aptos.length}${total ? ` de ${total}` : ""} apto(s) trabalhado(s)</span>
         </div>
+        ${seletorHtml}
         ${gradeHtml}
         ${chips ? `<div class="mp-chips">${chips}</div>` : ""}
         ${campoHtml}
@@ -224,6 +270,16 @@ document.addEventListener("DOMContentLoaded", () => {
     if (e.target === modal) ModalPredios.fechar();
   });
   document.getElementById("modal-predios-fechar")?.addEventListener("click", () => ModalPredios.fechar());
+  // Seletor "Aptos por andar" (delegado: a lista é redesenhada a cada mudança)
+  modal.addEventListener("change", evento => {
+    const sel = evento.target;
+    if (sel instanceof HTMLSelectElement && sel.dataset.porAndar) ModalPredios.escolherPorAndar(sel.dataset.porAndar, sel.value);
+  });
+  // Digitar no campo limpa o aviso de campo vazio/inválido (vale também para a lista do mapa)
+  document.addEventListener("input", evento => {
+    const campo = evento.target;
+    if (campo instanceof HTMLInputElement && campo.dataset.aptoInput) App.limparErroCampoApto(campo);
+  });
   // Enter no campo de apartamentos equivale a "Adicionar"
   modal.addEventListener("keydown", evento => {
     const campo = evento.target;

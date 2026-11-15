@@ -1304,14 +1304,14 @@ const App = {
 
     const { validos, invalidos } = this.interpretarApartamentosDigitados(campo.value);
     if (invalidos.length) {
-      Utils.mostrarToast(`Identificação inválida: ${invalidos.slice(0, 3).join(", ")}. Use até 10 letras/números por apartamento (ex.: 101, 12B).`, "aviso");
+      this.mostrarErroCampoApto(campo, `Identificação inválida: ${invalidos.slice(0, 3).join(", ")}. Use até 10 letras/números por apartamento (ex.: 101, 12B).`);
       return;
     }
     if (!validos.length) {
-      Utils.mostrarToast("Digite o número de um ou mais apartamentos (ex.: 101, 102).", "aviso");
-      campo.focus();
+      this.mostrarErroCampoApto(campo, "Digite o número de um ou mais apartamentos antes de adicionar (ex.: 101, 102).");
       return;
     }
+    this.limparErroCampoApto(campo);
 
     const t = this.territorios.find(item => Number(item.numero) === Number(numeroTerritorio));
     const p = t && Array.isArray(t.predios) ? t.predios.find(item => item.idPredio === idPredio) : null;
@@ -1331,6 +1331,36 @@ const App = {
       if (!this.semConexao()) Utils.mostrarToast(`${novaLista.length - atuais.length} apartamento(s) registrado(s) como trabalhado(s).`, "sucesso");
     } else {
       campo.disabled = false;
+    }
+  },
+
+  /**
+   * Aviso junto ao campo de apartamentos (o toast no canto da tela fica escondido pelo teclado
+   * do celular). Usa o parágrafo [data-apto-erro] do mesmo prédio quando existe; senão, o toast.
+   */
+  mostrarErroCampoApto(campo, mensagem) {
+    campo.setAttribute("aria-invalid", "true");
+    campo.classList.add("campo-invalido");
+    const escopo = campo.closest ? campo.closest("[data-escopo-aptos]") : null;
+    const aviso = escopo ? escopo.querySelector("[data-apto-erro]") : null;
+    if (aviso) {
+      aviso.textContent = mensagem;
+      aviso.hidden = false;
+    } else {
+      Utils.mostrarToast(mensagem, "aviso");
+    }
+    campo.focus();
+  },
+
+  limparErroCampoApto(campo) {
+    if (!campo) return;
+    campo.removeAttribute("aria-invalid");
+    campo.classList.remove("campo-invalido");
+    const escopo = campo.closest ? campo.closest("[data-escopo-aptos]") : null;
+    const aviso = escopo ? escopo.querySelector("[data-apto-erro]") : null;
+    if (aviso) {
+      aviso.textContent = "";
+      aviso.hidden = true;
     }
   },
 
