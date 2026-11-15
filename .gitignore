@@ -27,3 +27,9 @@ scripts/rurais/.cache/
 
 # Cache local das estradas do OSM para o rascunho de territórios (scripts/territorios/rascunho-limite.js)
 scripts/territorios/.cache/
+
+# Dados geográficos com localização de residências (LGPD, spec 07) — nunca versionar
+# (ex.: exportações do Google My Maps / Google Earth)
+kml/
+*.kmz
+*.kml
