@@ -254,6 +254,7 @@ const App = {
       if (e.key !== "Escape") return;
       // O cartão de impressão abre por cima da modal: Esc fecha primeiro o que está na frente
       if (MapaTerritorios.cartaoMap) MapaTerritorios.fecharCartaoImpressao();
+      else if (ModalPredios.estaAberta()) ModalPredios.fechar();
       else MapaTerritorios.fecharModalTerritorio();
     });
 
@@ -605,6 +606,7 @@ const App = {
     if (MapaTerritorios.territorioModalAtual) {
       MapaTerritorios.abrirModalTerritorio(MapaTerritorios.territorioModalAtual);
     }
+    ModalPredios.atualizarSeAberto();
 
     // Link direto presente na URL: atendido uma vez, depois que os territórios chegam
     if (!this._linkDiretoProcessado) {
@@ -859,8 +861,8 @@ const App = {
       }).join("");
 
       const maisPrediosHtml = qtdPredios > 3
-        ? `<button type="button" data-acao="abrir-mapa" data-num="${num}" class="mt-1 w-full text-left text-[11px] font-bold text-[#0b57d0] hover:underline">
-            + ${qtdPredios - 3} outro(s) prédio(s) no cartão — Ver todos no mapa →
+        ? `<button type="button" data-acao="abrir-predios" data-num="${num}" class="mt-1 w-full text-left text-[11px] font-bold text-[#0b57d0] hover:underline">
+            + ${qtdPredios - 3} outro(s) prédio(s) no cartão — Ver todos →
           </button>`
         : "";
 
@@ -868,8 +870,8 @@ const App = {
         <div class="mt-3 p-2.5 rounded-xl bg-slate-50 border border-slate-200/90">
           <div class="flex items-center justify-between gap-2 mb-1">
             <span class="text-[11px] font-bold text-slate-800">🏢 ${qtdPredios} Prédio(s) no Cartão</span>
-            <button type="button" data-acao="abrir-mapa" data-num="${num}" class="text-[11px] font-bold text-[#0b57d0] hover:underline">
-              ${t.statusReal === "OCUPADO" ? `${prediosConcluidos}/${qtdPredios} trabalhados →` : "Mapa e Interfones →"}
+            <button type="button" data-acao="abrir-predios" data-num="${num}" class="text-[11px] font-bold text-[#0b57d0] hover:underline">
+              ${t.statusReal === "OCUPADO" ? `${prediosConcluidos}/${qtdPredios} trabalhados →` : "Prédios e interfones →"}
             </button>
           </div>
           <div class="divide-y divide-slate-100">
@@ -928,8 +930,14 @@ const App = {
     }
 
     const btnMapa = t.wkt
-      ? `<button type="button" data-acao="abrir-mapa" data-num="${num}" class="py-2 px-3.5 rounded-full bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-semibold transition" title="Abrir mapa e guia de prédios">
-          🗺️ Mapa${qtdPredios ? ` (${qtdPredios})` : ""}
+      ? `<button type="button" data-acao="abrir-mapa" data-num="${num}" class="py-2 px-3.5 rounded-full bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-semibold transition" title="Abrir o mapa do cartão">
+          🗺️ Mapa
+        </button>`
+      : "";
+    // Modal dedicada para marcar apartamentos e prédios trabalhados
+    const btnPredios = qtdPredios
+      ? `<button type="button" data-acao="abrir-predios" data-num="${num}" class="py-2 px-3.5 rounded-full bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-semibold transition" title="Prédios e apartamentos deste cartão">
+          🏢 Prédios (${qtdPredios})
         </button>`
       : "";
 
@@ -958,6 +966,7 @@ const App = {
         </div>
         <div class="mt-4 pt-3 border-t border-slate-100 flex items-center gap-2">
           ${areaAcoes}
+          ${btnPredios}
           ${btnMapa}
         </div>
       </article>
@@ -1141,6 +1150,7 @@ const App = {
       if (MapaTerritorios.territorioModalAtual === Number(numeroTerritorio)) {
         MapaTerritorios.abrirModalTerritorio(Number(numeroTerritorio), idPredio);
       }
+      ModalPredios.atualizarSeAberto(numeroTerritorio);
     };
 
     // Otimista: a tela muda na hora; o servidor confirma (ou desfaz) em seguida
@@ -1241,6 +1251,7 @@ const App = {
       if (MapaTerritorios.territorioModalAtual === Number(numeroTerritorio)) {
         MapaTerritorios.atualizarListaPrediosModal(idPredio);
       }
+      ModalPredios.atualizarSeAberto(numeroTerritorio);
     };
 
     // Otimista: a lista aparece na hora, na mesma ordem que o servidor devolveria
@@ -1279,9 +1290,16 @@ const App = {
    * Registra apartamentos já trabalhados de um prédio (apenas o número da unidade, sem dados de moradores).
    * O histórico é mantido entre devoluções até que todos os prédios do cartão sejam concluídos.
    */
-  async acaoAdicionarApartamentos(idPredio, numeroTerritorio) {
-    const campo = Array.from(document.querySelectorAll("#modal-predios-lista input[data-apto-input]"))
-      .find(el => el.dataset.aptoInput === idPredio);
+  async acaoAdicionarApartamentos(idPredio, numeroTerritorio, origem) {
+    // origem: o campo (Enter) ou o botão "Adicionar"; o campo é o do mesmo bloco do prédio
+    // (modal de prédios ou lista do mapa)
+    let campo = origem instanceof HTMLInputElement ? origem : null;
+    const escopo = !campo && origem && origem.closest ? origem.closest("[data-escopo-aptos]") : null;
+    if (!campo && escopo) campo = escopo.querySelector("input[data-apto-input]");
+    if (!campo) {
+      campo = Array.from(document.querySelectorAll("#modal-predios-lista input[data-apto-input]"))
+        .find(el => el.dataset.aptoInput === idPredio);
+    }
     if (!campo || campo.disabled) return;
 
     const { validos, invalidos } = this.interpretarApartamentosDigitados(campo.value);
@@ -1956,7 +1974,10 @@ const App = {
  * nunca como código. Escuta na fase de captura para funcionar também dentro dos popups do Leaflet.
  */
 const ACOES_UI = {
-  "abrir-mapa": el => MapaTerritorios.abrirModalTerritorio(Number(el.dataset.num), el.dataset.idPredio || undefined),
+  "abrir-mapa": el => {
+    if (ModalPredios.estaAberta()) ModalPredios.fechar();
+    MapaTerritorios.abrirModalTerritorio(Number(el.dataset.num), el.dataset.idPredio || undefined);
+  },
   "solicitar": el => App.acaoSolicitar(Number(el.dataset.num)),
   "devolver": el => App.acaoDevolver(Number(el.dataset.num)),
   "modal-solicitar": el => { MapaTerritorios.fecharModalTerritorio(); return App.acaoSolicitar(Number(el.dataset.num)); },
@@ -1967,7 +1988,11 @@ const ACOES_UI = {
   "filtrar-dirigente": el => App.filtrarDashboardPorDirigente(el.dataset.dirigente || ""),
   "alternar-predio": el => App.acaoAlternarPredioTrabalhado(el.dataset.idPredio, Number(el.dataset.num), el.dataset.trabalhado === "true"),
   "focar-predio": el => MapaTerritorios.focarPredioNoModal(el.dataset.idPredio),
-  "adicionar-aptos": el => App.acaoAdicionarApartamentos(el.dataset.idPredio, Number(el.dataset.num)),
+  "adicionar-aptos": el => App.acaoAdicionarApartamentos(el.dataset.idPredio, Number(el.dataset.num), el),
+  "abrir-predios": el => ModalPredios.abrir(Number(el.dataset.num)),
+  "alternar-apto": el => ModalPredios.alternarApto(el.dataset.idPredio, Number(el.dataset.num), el.dataset.apto),
+  "predios-filtro": el => ModalPredios.definirFiltro(el.dataset.filtro),
+  "predios-ver-mapa": el => { ModalPredios.fechar(); MapaTerritorios.abrirModalTerritorio(Number(el.dataset.num)); },
   "remover-apto": el => App.acaoRemoverApartamento(el.dataset.idPredio, Number(el.dataset.num), el.dataset.apto),
   "marcar-quadras": el => App.acaoMarcarQuadras(Number(el.dataset.num)),
   "offline-baixar": el => App.acaoBaixarPacoteOffline(Number(el.dataset.num)),

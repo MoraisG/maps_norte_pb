@@ -9,7 +9,7 @@
  * - Ladrilhos de mapa (outras origens) seguem direto para a rede, exceto quando existe um pacote
  *   offline baixado (js/pacote-offline.js): aí o ladrilho guardado é servido primeiro.
  */
-const VERSAO = 18;
+const VERSAO = 19;
 const PREFIXO_CACHE = "territorios-pwa-shell-";
 const PREFIXO_PACOTE = "territorios-tiles-";   // pacotes offline de ladrilhos, um cache por território
 const DOWNLOADS_PARALELOS = 6;
@@ -32,6 +32,7 @@ const STATIC_ASSETS = [
   `./js/armazenamento.js?v=${VERSAO}`,
   `./js/fila.js?v=${VERSAO}`,
   `./js/pacote-offline.js?v=${VERSAO}`,
+  `./js/modal-predios.js?v=${VERSAO}`,
   `./js/map.js?v=${VERSAO}`,
   `./js/instalacao.js?v=${VERSAO}`,
   `./js/app.js?v=${VERSAO}`,
