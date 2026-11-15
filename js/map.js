@@ -33,7 +33,7 @@ const MapaTerritorios = {
   CHAVE_ESRI: "",
   FALHAS_SATELITE_PARA_DESISTIR: 4,
   ZOOM_MIN_DETALHES: 15,          // quadras numeradas e pinos de prédios só a partir deste zoom
-  VERSAO_QUADRAS_GEO: 24,         // manter igual à VERSAO de sw.js (vale também para vias-rurais.geojson)
+  VERSAO_QUADRAS_GEO: 25,         // manter igual à VERSAO de sw.js (vale também para vias-rurais.geojson)
   ZOOM_MIN_NOMES_VIAS: 14,        // nomes das estradas rurais só a partir deste zoom
   ATRIBUICAO_OSM: '&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener noreferrer">OpenStreetMap</a> contributors',
   _localizacao: new Map(),        // mapa -> estado do "minha posição" (GPS)
@@ -42,6 +42,7 @@ const MapaTerritorios = {
   quadrasGeoLayer: null,          // mapa geral
   modalQuadrasGeoLayer: null,     // mapa do cartão
   modalViasRuraisLayer: null,     // estradas do OSM no cartão rural (vias-rurais.geojson)
+  abaModal: "cartao",             // aba da janela do cartão: cartao | quadras | predios
   modalPontosRuraisLayer: null,   // casas do interior (aba PontosRurais; só para quem está com o cartão)
   _rendererPontos: null,
   _controlePontos: null,
@@ -1145,9 +1146,12 @@ const MapaTerritorios = {
       this.quadrasEdicao = null;
     }
 
+    // Outro cartão volta para a aba Cartão; redesenho do mesmo cartão (ex.: marcar prédio) mantém a aba
+    if (this.territorioModalAtual !== Number(t.numero)) this.abaModal = "cartao";
     this.territorioModalAtual = Number(t.numero);
     const modal = document.getElementById("modal-mapa-territorio");
     if (!modal) return;
+    this.definirAbaModal(this.abaModal, { semAjuste: true });
 
     document.getElementById("modal-mapa-tipo").textContent = t.tipo || "Cidade";
     document.getElementById("modal-mapa-titulo").textContent = `Território ${Number(t.numero)} — ${t.bairro}`;
@@ -1159,6 +1163,13 @@ const MapaTerritorios = {
     statusBadge.textContent = label;
 
     const predios = Array.isArray(t.predios) ? t.predios : [];
+    const contAbaPredios = document.getElementById("modal-aba-predios-count");
+    if (contAbaPredios) contAbaPredios.textContent = predios.length ? String(predios.length) : "";
+    const contAbaQuadras = document.getElementById("modal-aba-quadras-count");
+    if (contAbaQuadras) {
+      const nQuadras = Array.isArray(t.quadrasTrabalhadas) ? t.quadrasTrabalhadas.length : 0;
+      contAbaQuadras.textContent = nQuadras ? `${nQuadras} ✓` : "";
+    }
     const countBadge = document.getElementById("modal-mapa-predios-count");
     if (countBadge) {
       if (predios.length > 0) {
@@ -1247,17 +1258,9 @@ const MapaTerritorios = {
           ${metaStr ? `<p class="text-[11px] text-slate-500 mt-0.5">${Utils.escapeHtml(metaStr)}</p>` : ""}
           ${p.referenciaComercial ? `<p class="text-[11px] text-slate-600 mt-0.5">📍 ${Utils.escapeHtml(p.referenciaComercial)}</p>` : ""}
           ${tagsBadges.length ? `<div class="mt-1.5 flex flex-wrap gap-1">${tagsBadges.map(b => `<span class="px-2 py-0.5 text-[10px] font-medium rounded-full ${b.cls}">${b.texto}</span>`).join("")}</div>` : ""}
+          ${this.htmlAcoesBalaoPredio(t, p)}
         </div>
       `);
-
-      marker.on("click", () => {
-        const cardEl = document.getElementById(`card-predio-${p.idPredio}`);
-        if (cardEl) {
-          cardEl.scrollIntoView({ behavior: "smooth", block: "nearest" });
-          cardEl.classList.add("ring-2", "ring-[#0b57d0]");
-          setTimeout(() => cardEl.classList.remove("ring-2", "ring-[#0b57d0]"), 1800);
-        }
-      });
 
       this.modalLayerGroup.addLayer(marker);
       this.modalMarkersPorId[p.idPredio] = { marker, lat: item.lat, lng: item.lng };
@@ -1283,7 +1286,7 @@ const MapaTerritorios = {
     this._modalTimer = setTimeout(() => {
       this.modalMap.invalidateSize();
       try {
-        if (idPredioDestaque && this.modalMarkersPorId[idPredioDestaque]) {
+        if (idPredioDestaque && this.modalMarkersPorId[idPredioDestaque] && this.abaModal !== "predios") {
           this.focarPredioNoModal(idPredioDestaque);
         } else if (this._modalEnquadradoPara !== Number(t.numero)) {
           // Reabrir o mesmo cartão (ex.: sincronização) não desfaz o zoom/posição do usuário
@@ -1375,7 +1378,7 @@ const MapaTerritorios = {
       const aptosHtml = this.criarHtmlApartamentos(t, p, podeMarcarPredio);
 
       return `
-        <div id="card-predio-${Utils.escapeHtml(p.idPredio)}" data-acao="focar-predio" data-id-predio="${Utils.escapeHtml(p.idPredio)}" class="p-3 rounded-2xl border ${concluido ? "bg-[#f4fbf6] border-[#a8dab5]" : "bg-white border-slate-200 hover:border-slate-300"} cursor-pointer transition">
+        <div id="card-predio-${Utils.escapeHtml(p.idPredio)}" class="scroll-mt-3 p-3 rounded-2xl border ${concluido ? "bg-[#f4fbf6] border-[#a8dab5]" : "bg-white border-slate-200"} transition">
           <div class="flex items-start justify-between gap-2">
             <div class="flex items-start gap-2.5 min-w-0">
               <span class="predio-pin-marker ${pinClass} shrink-0 mt-0.5">${item.ordemPin}</span>
@@ -1386,6 +1389,7 @@ const MapaTerritorios = {
                 ${p.referenciaComercial ? `<p class="text-[11px] text-slate-500 mt-0.5">📍 ${Utils.escapeHtml(p.referenciaComercial)}</p>` : ""}
               </div>
             </div>
+            ${item.lat && item.lng ? `<button type="button" data-acao="focar-predio" data-id-predio="${Utils.escapeHtml(p.idPredio)}" class="shrink-0 px-2 py-1 rounded-full text-[11px] font-semibold text-[#0b57d0] hover:bg-[#e8f0fe]">🗺️ Ver no mapa</button>` : ""}
           </div>
 
           <div class="mt-2 flex flex-wrap gap-1">
@@ -1503,8 +1507,8 @@ const MapaTerritorios = {
     if (!barra) return;
     const podeEditar = this.podeEditarQuadras(t);
     if (!podeEditar && !pinos.length) {
-      barra.className = "hidden";
-      barra.innerHTML = "";
+      barra.innerHTML = `<p class="text-[11px] text-slate-600">📍 Os números no mapa são as quadras do cartão. Para marcar as quadras trabalhadas, o cartão precisa estar com você.</p>`;
+      barra.className = "flex flex-wrap items-center gap-2 px-3 py-2 rounded-2xl border border-slate-200 bg-white";
       return;
     }
 
@@ -1535,6 +1539,7 @@ const MapaTerritorios = {
   iniciarEdicaoQuadras() {
     const t = App.territorios.find(item => Number(item.numero) === this.territorioModalAtual);
     if (!this.podeEditarQuadras(t)) return;
+    if (this.abaModal !== "quadras") this.definirAbaModal("quadras");
     this.quadrasEdicao = {
       numero: Number(t.numero),
       pinos: (Array.isArray(t.quadrasTrabalhadas) ? t.quadrasTrabalhadas : []).map(p => ({ lat: p.lat, lng: p.lng })),
@@ -1557,7 +1562,7 @@ const MapaTerritorios = {
   },
 
   aoClicarMapaModal(evento) {
-    if (!this.quadrasEdicao || !evento || !evento.latlng) return;
+    if (!this.quadrasEdicao || !evento || !evento.latlng || this.abaModal !== "quadras") return;
     if (this.modalLimitesTerritorio && !this.modalLimitesTerritorio.contains(evento.latlng)) {
       Utils.mostrarToast("Toque dentro da área do território para marcar a quadra.", "aviso");
       return;
@@ -1574,11 +1579,70 @@ const MapaTerritorios = {
     this.renderizarQuadrasModal();
   },
 
+  /** Botões do balão do prédio: ir para a lista e marcar/desfazer "trabalhado" (só quem pode marcar). */
+  htmlAcoesBalaoPredio(t, p) {
+    const id = Utils.escapeHtml(p.idPredio);
+    const num = Number(t.numero);
+    const concluido = Boolean(p.trabalhadoNesteCiclo || p.ultimaDataConclusao);
+    const podeMarcar = t.statusReal === "OCUPADO" && (t.emMinhaPosse || (App.usuarioAtual && App.usuarioAtual.perfil === "ADMIN"));
+    return `
+      <div class="balao-predio-acoes">
+        <button type="button" data-acao="predio-na-lista" data-id-predio="${id}" class="balao-btn">🏢 Abrir na lista de prédios</button>
+        ${podeMarcar
+          ? `<button type="button" data-acao="alternar-predio" data-num="${num}" data-id-predio="${id}" data-trabalhado="${!concluido}"
+              class="balao-btn ${concluido ? "desfazer" : "primario"}">${concluido ? `✓ Trabalhado (${Utils.formatarDataBr(p.ultimaDataConclusao)}) — Desfazer` : "Marcar prédio como trabalhado"}</button>`
+          : (concluido ? `<p class="balao-feito">✓ Trabalhado neste ciclo (${Utils.formatarDataBr(p.ultimaDataConclusao)})</p>` : "")}
+      </div>`;
+  },
+
+  /** Do balão no mapa para a aba Prédios, rolando até o prédio e destacando-o. */
+  mostrarPredioNaLista(idPredio) {
+    if (this.modalMap) this.modalMap.closePopup();
+    this.definirAbaModal("predios");
+    const card = document.getElementById(`card-predio-${idPredio}`);
+    if (!card) return;
+    setTimeout(() => {
+      card.scrollIntoView({ behavior: "smooth", block: "start" });
+      card.classList.add("ring-2", "ring-[#0b57d0]");
+      setTimeout(() => card.classList.remove("ring-2", "ring-[#0b57d0]"), 2000);
+    }, 50);
+  },
+
   focarPredioNoModal(idPredio) {
     const info = this.modalMarkersPorId[idPredio];
     if (!info || !this.modalMap) return;
+    if (this.abaModal === "predios") this.definirAbaModal("cartao");
     this.modalMap.setView([info.lat, info.lng], 18, { animate: true });
     info.marker.openPopup();
+  },
+
+  /**
+   * Abas da janela do cartão. Cartão e Quadras usam o mesmo mapa (não é recriado); Prédios mostra
+   * a lista em largura total. A aba Quadras é a única em que tocar no mapa marca quadra.
+   */
+  definirAbaModal(aba, opcoes) {
+    const valida = ["cartao", "quadras", "predios"].includes(aba) ? aba : "cartao";
+    if (this.quadrasEdicao && valida !== "quadras" && !(opcoes && opcoes.semAjuste)) {
+      if (this.quadrasEdicao.alterado) {
+        Utils.mostrarToast("Salve ou cancele as quadras marcadas antes de trocar de aba.", "aviso");
+        return;
+      }
+      this.quadrasEdicao = null;
+      this.renderizarQuadrasModal();
+    }
+    this.abaModal = valida;
+    const modal = document.getElementById("modal-mapa-territorio");
+    if (!modal) return;
+    modal.dataset.aba = valida;
+    modal.querySelectorAll("[data-acao='mapa-aba']").forEach(botao => {
+      const ativa = botao.dataset.aba === valida;
+      botao.classList.toggle("ativa", ativa);
+      botao.setAttribute("aria-selected", String(ativa));
+    });
+    // O mapa estava escondido na aba Prédios: recalcula o tamanho ao voltar
+    if (valida !== "predios" && this.modalMap && !(opcoes && opcoes.semAjuste)) {
+      setTimeout(() => this.modalMap && this.modalMap.invalidateSize(), 60);
+    }
   },
 
   fecharModalTerritorio() {
