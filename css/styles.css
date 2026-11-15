@@ -1370,3 +1370,35 @@ input.campo-invalido:focus {
     padding: 0.5rem 1.25rem 0;
   }
 }
+
+/* Balão do prédio no mapa do cartão */
+.balao-predio-acoes {
+  display: flex;
+  flex-direction: column;
+  gap: 0.375rem;
+  margin-top: 0.625rem;
+}
+.balao-btn {
+  width: 100%;
+  min-height: 2.25rem;
+  padding: 0.375rem 0.75rem;
+  border-radius: 9999px;
+  background: #e8f0fe;
+  color: #041e49;
+  font-size: 0.75rem;
+  font-weight: 600;
+}
+.balao-btn.primario {
+  background: #146c2e;
+  color: #ffffff;
+}
+.balao-btn.desfazer {
+  background: #f1f5f9;
+  color: #334155;
+}
+.balao-feito {
+  margin: 0;
+  font-size: 0.6875rem;
+  font-weight: 600;
+  color: #146c2e;
+}

@@ -2177,6 +2177,7 @@ const ACOES_UI = {
   "alternar-predio": el => App.acaoAlternarPredioTrabalhado(el.dataset.idPredio, Number(el.dataset.num), el.dataset.trabalhado === "true"),
   "focar-predio": el => MapaTerritorios.focarPredioNoModal(el.dataset.idPredio),
   "mapa-aba": el => MapaTerritorios.definirAbaModal(el.dataset.aba),
+  "predio-na-lista": el => MapaTerritorios.mostrarPredioNaLista(el.dataset.idPredio),
   "adicionar-aptos": el => App.acaoAdicionarApartamentos(el.dataset.idPredio, Number(el.dataset.num), el),
   "abrir-predios": el => ModalPredios.abrir(Number(el.dataset.num)),
   "alternar-apto": el => ModalPredios.alternarApto(el.dataset.idPredio, Number(el.dataset.num), el.dataset.apto),

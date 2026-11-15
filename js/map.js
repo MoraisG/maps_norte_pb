@@ -1146,7 +1146,8 @@ const MapaTerritorios = {
       this.quadrasEdicao = null;
     }
 
-    if (this.territorioModalAtual !== Number(t.numero) || idPredioDestaque) this.abaModal = "cartao";
+    // Outro cartão volta para a aba Cartão; redesenho do mesmo cartão (ex.: marcar prédio) mantém a aba
+    if (this.territorioModalAtual !== Number(t.numero)) this.abaModal = "cartao";
     this.territorioModalAtual = Number(t.numero);
     const modal = document.getElementById("modal-mapa-territorio");
     if (!modal) return;
@@ -1257,17 +1258,9 @@ const MapaTerritorios = {
           ${metaStr ? `<p class="text-[11px] text-slate-500 mt-0.5">${Utils.escapeHtml(metaStr)}</p>` : ""}
           ${p.referenciaComercial ? `<p class="text-[11px] text-slate-600 mt-0.5">📍 ${Utils.escapeHtml(p.referenciaComercial)}</p>` : ""}
           ${tagsBadges.length ? `<div class="mt-1.5 flex flex-wrap gap-1">${tagsBadges.map(b => `<span class="px-2 py-0.5 text-[10px] font-medium rounded-full ${b.cls}">${b.texto}</span>`).join("")}</div>` : ""}
+          ${this.htmlAcoesBalaoPredio(t, p)}
         </div>
       `);
-
-      marker.on("click", () => {
-        const cardEl = document.getElementById(`card-predio-${p.idPredio}`);
-        if (cardEl) {
-          cardEl.scrollIntoView({ behavior: "smooth", block: "nearest" });
-          cardEl.classList.add("ring-2", "ring-[#0b57d0]");
-          setTimeout(() => cardEl.classList.remove("ring-2", "ring-[#0b57d0]"), 1800);
-        }
-      });
 
       this.modalLayerGroup.addLayer(marker);
       this.modalMarkersPorId[p.idPredio] = { marker, lat: item.lat, lng: item.lng };
@@ -1293,7 +1286,7 @@ const MapaTerritorios = {
     this._modalTimer = setTimeout(() => {
       this.modalMap.invalidateSize();
       try {
-        if (idPredioDestaque && this.modalMarkersPorId[idPredioDestaque]) {
+        if (idPredioDestaque && this.modalMarkersPorId[idPredioDestaque] && this.abaModal !== "predios") {
           this.focarPredioNoModal(idPredioDestaque);
         } else if (this._modalEnquadradoPara !== Number(t.numero)) {
           // Reabrir o mesmo cartão (ex.: sincronização) não desfaz o zoom/posição do usuário
@@ -1385,7 +1378,7 @@ const MapaTerritorios = {
       const aptosHtml = this.criarHtmlApartamentos(t, p, podeMarcarPredio);
 
       return `
-        <div id="card-predio-${Utils.escapeHtml(p.idPredio)}" data-acao="focar-predio" data-id-predio="${Utils.escapeHtml(p.idPredio)}" class="p-3 rounded-2xl border ${concluido ? "bg-[#f4fbf6] border-[#a8dab5]" : "bg-white border-slate-200 hover:border-slate-300"} cursor-pointer transition">
+        <div id="card-predio-${Utils.escapeHtml(p.idPredio)}" class="scroll-mt-3 p-3 rounded-2xl border ${concluido ? "bg-[#f4fbf6] border-[#a8dab5]" : "bg-white border-slate-200"} transition">
           <div class="flex items-start justify-between gap-2">
             <div class="flex items-start gap-2.5 min-w-0">
               <span class="predio-pin-marker ${pinClass} shrink-0 mt-0.5">${item.ordemPin}</span>
@@ -1396,6 +1389,7 @@ const MapaTerritorios = {
                 ${p.referenciaComercial ? `<p class="text-[11px] text-slate-500 mt-0.5">📍 ${Utils.escapeHtml(p.referenciaComercial)}</p>` : ""}
               </div>
             </div>
+            ${item.lat && item.lng ? `<button type="button" data-acao="focar-predio" data-id-predio="${Utils.escapeHtml(p.idPredio)}" class="shrink-0 px-2 py-1 rounded-full text-[11px] font-semibold text-[#0b57d0] hover:bg-[#e8f0fe]">🗺️ Ver no mapa</button>` : ""}
           </div>
 
           <div class="mt-2 flex flex-wrap gap-1">
@@ -1583,6 +1577,35 @@ const MapaTerritorios = {
     });
     this.quadrasEdicao.alterado = true;
     this.renderizarQuadrasModal();
+  },
+
+  /** Botões do balão do prédio: ir para a lista e marcar/desfazer "trabalhado" (só quem pode marcar). */
+  htmlAcoesBalaoPredio(t, p) {
+    const id = Utils.escapeHtml(p.idPredio);
+    const num = Number(t.numero);
+    const concluido = Boolean(p.trabalhadoNesteCiclo || p.ultimaDataConclusao);
+    const podeMarcar = t.statusReal === "OCUPADO" && (t.emMinhaPosse || (App.usuarioAtual && App.usuarioAtual.perfil === "ADMIN"));
+    return `
+      <div class="balao-predio-acoes">
+        <button type="button" data-acao="predio-na-lista" data-id-predio="${id}" class="balao-btn">🏢 Abrir na lista de prédios</button>
+        ${podeMarcar
+          ? `<button type="button" data-acao="alternar-predio" data-num="${num}" data-id-predio="${id}" data-trabalhado="${!concluido}"
+              class="balao-btn ${concluido ? "desfazer" : "primario"}">${concluido ? `✓ Trabalhado (${Utils.formatarDataBr(p.ultimaDataConclusao)}) — Desfazer` : "Marcar prédio como trabalhado"}</button>`
+          : (concluido ? `<p class="balao-feito">✓ Trabalhado neste ciclo (${Utils.formatarDataBr(p.ultimaDataConclusao)})</p>` : "")}
+      </div>`;
+  },
+
+  /** Do balão no mapa para a aba Prédios, rolando até o prédio e destacando-o. */
+  mostrarPredioNaLista(idPredio) {
+    if (this.modalMap) this.modalMap.closePopup();
+    this.definirAbaModal("predios");
+    const card = document.getElementById(`card-predio-${idPredio}`);
+    if (!card) return;
+    setTimeout(() => {
+      card.scrollIntoView({ behavior: "smooth", block: "start" });
+      card.classList.add("ring-2", "ring-[#0b57d0]");
+      setTimeout(() => card.classList.remove("ring-2", "ring-[#0b57d0]"), 2000);
+    }, 50);
   },
 
   focarPredioNoModal(idPredio) {
