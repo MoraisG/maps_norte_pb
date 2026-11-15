@@ -33,7 +33,7 @@ const MapaTerritorios = {
   CHAVE_ESRI: "",
   FALHAS_SATELITE_PARA_DESISTIR: 4,
   ZOOM_MIN_DETALHES: 15,          // quadras numeradas e pinos de prédios só a partir deste zoom
-  VERSAO_QUADRAS_GEO: 23,         // manter igual à VERSAO de sw.js (vale também para vias-rurais.geojson)
+  VERSAO_QUADRAS_GEO: 24,         // manter igual à VERSAO de sw.js (vale também para vias-rurais.geojson)
   ZOOM_MIN_NOMES_VIAS: 14,        // nomes das estradas rurais só a partir deste zoom
   ATRIBUICAO_OSM: '&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener noreferrer">OpenStreetMap</a> contributors',
   _localizacao: new Map(),        // mapa -> estado do "minha posição" (GPS)
@@ -42,6 +42,9 @@ const MapaTerritorios = {
   quadrasGeoLayer: null,          // mapa geral
   modalQuadrasGeoLayer: null,     // mapa do cartão
   modalViasRuraisLayer: null,     // estradas do OSM no cartão rural (vias-rurais.geojson)
+  modalPontosRuraisLayer: null,   // casas do interior (aba PontosRurais; só para quem está com o cartão)
+  _rendererPontos: null,
+  _controlePontos: null,
   _rendererVias: null,
   _viasRurais: null,              // Map(numeroTerritorio → [via])
   _viasRuraisPromessa: null,
@@ -129,9 +132,15 @@ const MapaTerritorios = {
     // O grupo leva o crédito do OSM, que assim aparece também sobre o satélite e o "Sem mapa".
     this._rendererVias = L.canvas({ pane: "viasRurais", padding: 0.3 });
     this.modalViasRuraisLayer = L.layerGroup([], { attribution: this.ATRIBUICAO_OSM }).addTo(this.modalMap);
+    // Casas do interior: canvas num pane próprio, acima dos territórios e clicável
+    const panePontos = this.modalMap.createPane("pontosRurais");
+    panePontos.style.zIndex = 610;
+    this._rendererPontos = L.canvas({ pane: "pontosRurais", padding: 0.3, tolerance: 6 });
+    this.modalPontosRuraisLayer = L.layerGroup().addTo(this.modalMap);
     this.criarCamadasBase(this.modalMap, {
       "Quadras numeradas": this.modalQuadrasGeoLayer,
-      "Estradas (rurais)": this.modalViasRuraisLayer
+      "Estradas (rurais)": this.modalViasRuraisLayer,
+      "Casas (rurais)": this.modalPontosRuraisLayer
     });
     this.criarMinimapa(this.modalMap);
 
@@ -611,6 +620,70 @@ const MapaTerritorios = {
       this.map.removeLayer(this._contornoSelecao);
       this._contornoSelecao = null;
     }
+  },
+
+  /**
+   * ==========================================================================
+   * CASAS DO INTERIOR (pontos rurais) — spec 07, fase 2
+   * ==========================================================================
+   * Laranja = falta visitar; verde = visitada. Quem está com o cartão marca pelo popup.
+   * Os endereços só chegam a quem está com o cartão (ou ADMIN); os demais veem a contagem.
+   */
+  COR_PONTO_PENDENTE: "#e8710a",
+  COR_PONTO_VISITADO: "#146c2e",
+
+  renderizarPontosRuraisModal(t) {
+    if (!this.modalPontosRuraisLayer) return;
+    this.modalPontosRuraisLayer.clearLayers();
+    if (this._controlePontos) { this._controlePontos.remove(); this._controlePontos = null; }
+    if (!t) return;
+    const pontos = Array.isArray(t.pontosRurais) ? t.pontosRurais : [];
+    const total = Number(t.totalPontosRurais) || pontos.length;
+    if (!total) return;
+
+    const podeMarcar = t.statusReal === "OCUPADO" && (t.emMinhaPosse || (App.usuarioAtual && App.usuarioAtual.perfil === "ADMIN"));
+    for (const p of pontos) {
+      const visitado = Boolean(p.visitadoEm);
+      const marcador = L.circleMarker([p.lat, p.lng], {
+        renderer: this._rendererPontos,
+        radius: Number(p.domicilios) > 1 ? 8 : 6.5,
+        color: "#ffffff",
+        weight: 2,
+        fillColor: visitado ? this.COR_PONTO_VISITADO : this.COR_PONTO_PENDENTE,
+        fillOpacity: 0.95
+      });
+      marcador.bindPopup(() => this.htmlPopupPonto(t, p, podeMarcar), { className: "popup-ponto", maxWidth: 260 });
+      this.modalPontosRuraisLayer.addLayer(marcador);
+    }
+
+    const visitados = pontos.length ? pontos.filter(p => p.visitadoEm).length : (Number(t.pontosRuraisVisitados) || 0);
+    const Controle = L.Control.extend({
+      options: { position: "bottomright" },
+      onAdd: () => {
+        const el = L.DomUtil.create("div", "leaflet-bar controle-pontos");
+        el.innerHTML = pontos.length
+          ? `<span class="cp-item"><i class="cp-cor" style="background:${this.COR_PONTO_PENDENTE}"></i>Falta</span>
+             <span class="cp-item"><i class="cp-cor" style="background:${this.COR_PONTO_VISITADO}"></i>Visitada</span>
+             <b>🏠 ${visitados} de ${pontos.length} casas visitadas</b>`
+          : `<b>🏠 ${visitados} de ${total} casas visitadas</b><span>Endereços visíveis para quem estiver com o cartão.</span>`;
+        L.DomEvent.disableClickPropagation(el);
+        return el;
+      }
+    });
+    this._controlePontos = new Controle().addTo(this.modalMap);
+  },
+
+  htmlPopupPonto(t, p, podeMarcar) {
+    const visitado = Boolean(p.visitadoEm);
+    const dom = Number(p.domicilios) || 1;
+    return `
+      <div class="pp">
+        <p class="pp-titulo">${Utils.escapeHtml(p.logradouro || "Casa do interior")}</p>
+        <p class="pp-meta">${p.localidade ? Utils.escapeHtml(p.localidade) + " • " : ""}${dom} domicílio(s) neste ponto</p>
+        <p class="pp-status ${visitado ? "ok" : ""}">${visitado ? `✓ Visitada em ${Utils.formatarDataBr(p.visitadoEm)}` : "Ainda não visitada"}</p>
+        ${podeMarcar ? `<button type="button" data-acao="ponto-visitado" data-num="${Number(t.numero)}" data-id-ponto="${Utils.escapeHtml(p.idPonto)}"
+            data-visitado="${!visitado}" class="pp-botao ${visitado ? "desfazer" : ""}">${visitado ? "Desfazer" : "Marcar como visitada"}</button>` : ""}
+      </div>`;
   },
 
   ehRural(t) {
@@ -1195,6 +1268,7 @@ const MapaTerritorios = {
     this.renderizarQuadrasModal();
     this.renderizarQuadrasGeoModal();
     this.renderizarViasRuraisModal(t);
+    this.renderizarPontosRuraisModal(t);
     this.atualizarRotulos(this.modalMap, this._rotulosModal);
 
     this.renderizarBarraOffline();
