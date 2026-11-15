@@ -9,7 +9,7 @@
  * - Ladrilhos de mapa (outras origens) seguem direto para a rede, exceto quando existe um pacote
  *   offline baixado (js/pacote-offline.js): aí o ladrilho guardado é servido primeiro.
  */
-const VERSAO = 22;
+const VERSAO = 23;
 const PREFIXO_CACHE = "territorios-pwa-shell-";
 const PREFIXO_PACOTE = "territorios-tiles-";   // pacotes offline de ladrilhos, um cache por território
 const DOWNLOADS_PARALELOS = 6;
