@@ -39,8 +39,20 @@ assert.deepStrictEqual(simples(M.gradeSugerida({ andares: 2, apartamentos: 0 }, 
 ]);
 assert.strictEqual(M.gradeSugerida({ andares: 2, apartamentos: 0 }, 13), null, "escolha fora do limite");
 assert.strictEqual(M.gradeSugerida({ andares: 0, apartamentos: 0 }, 2), null, "sem andares não há grade");
-// Escolha guardada no aparelho: só valores de 1 a 12; localStorage indisponível não quebra
-assert.strictEqual(M.porAndarEscolhido("P1"), 0);
+// Cadastro com "AptosPorAndar" prevalece sobre a divisão do total
+assert.strictEqual(M.gradeSugerida({ andares: 4, apartamentos: 6, aptosPorAndar: 2 })[0].unidades.length, 2);
+// Sugestão em revisão: a grade usa os números sugeridos
+const emRevisao = M.dadosEfetivos({ andares: 2, apartamentos: 0, revisaoPendente: { andares: 6, aptosPorAndar: 4, criadaEm: "agora" } });
+assert.deepStrictEqual(simples(emRevisao), { andares: 6, aptosPorAndar: 4, emRevisao: true });
+assert.strictEqual(M.gradeSugerida(emRevisao).length, 6);
+assert.strictEqual(M.dadosEfetivos({ andares: 3, apartamentos: 6, revisaoPendente: null }).emRevisao, false);
+// Validação do formulário "Corrigir cadastro"
+assert.deepStrictEqual(simples(M.validarCadastro("8", "4", "  ok ")), { andares: 8, aptosPorAndar: 4, observacao: "ok" });
+assert.ok(M.validarCadastro("", "4").erro);
+assert.ok(M.validarCadastro("8", "13").erro);
+assert.ok(M.validarCadastro("2.5", "2").erro);
+assert.strictEqual(M.textoTotal(8, 4), "= 32 apartamento(s)");
+assert.strictEqual(M.textoTotal("", 4), "");
 assert.strictEqual(M.gradeSugerida({ andares: 0, apartamentos: 6 }), null);
 assert.strictEqual(M.gradeSugerida({ andares: 2, apartamentos: 0 }), null);
 assert.strictEqual(M.gradeSugerida({ andares: "", apartamentos: "" }), null);

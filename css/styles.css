@@ -963,28 +963,183 @@ body {
   outline: none;
   border-color: #0b57d0;
 }
-.mp-por-andar {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 0.375rem;
-  margin-top: 0.625rem;
+/* Cadastro do prédio: sugestão de correção (andares × aptos por andar) com revisão do ADMIN */
+.mp-link-cadastro {
+  margin-top: 0.5rem;
   font-size: 0.6875rem;
   font-weight: 600;
-  color: #334155;
+  color: #0b57d0;
 }
-.mp-por-andar select {
-  min-height: 2rem;
+.mp-revisao {
+  margin-top: 0.5rem;
+  padding: 0.375rem 0.625rem;
+  border-radius: 0.625rem;
+  background: #fef7e0;
+  color: #7c4a00;
+  font-size: 0.6875rem;
+  font-weight: 600;
+}
+.mp-cadastro {
+  margin-top: 0.5rem;
+  padding: 0.625rem;
+  border: 1px solid #d3e3fd;
+  border-radius: 0.75rem;
+  background: #f8fafd;
+  display: flex;
+  flex-direction: column;
+  gap: 0.375rem;
+}
+.mp-cadastro-titulo {
+  font-size: 0.6875rem;
+  font-weight: 700;
+  color: #041e49;
+}
+.mp-cadastro-campos {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 0.5rem;
+}
+.mp-cadastro-campos label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.125rem;
+  font-size: 0.625rem;
+  font-weight: 600;
+  color: #475569;
+}
+.mp-cadastro-campos input {
+  width: 5.5rem;
+  min-height: 2.25rem;
   padding: 0 0.5rem;
   border: 1px solid #cbd5e1;
   border-radius: 0.625rem;
   background: #ffffff;
+  font-size: 0.8125rem;
+  color: #1e293b;
+}
+.mp-cadastro-total {
+  padding-bottom: 0.5rem;
+  font-size: 0.6875rem;
+  font-weight: 600;
+  color: #146c2e;
+}
+.mp-cadastro-obs {
+  width: 100%;
+  padding: 0.4375rem 0.75rem;
+  border: 1px solid #cbd5e1;
+  border-radius: 9999px;
   font-size: 0.75rem;
   color: #1e293b;
 }
-.mp-por-andar-info {
+.mp-cadastro-acoes {
+  display: flex;
+  gap: 0.375rem;
+}
+
+/* Painel admin: revisões de cadastro de prédios */
+.rv-item {
+  padding: 0.75rem 0.875rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.375rem;
+}
+.rv-titulo {
+  font-size: 0.75rem;
+  font-weight: 700;
+  color: #0f172a;
+}
+.rv-titulo span,
+.rv-meta {
+  font-size: 0.6875rem;
   font-weight: 400;
-  color: #94a3b8;
+  color: #64748b;
+}
+.rv-diffs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.375rem;
+}
+.rv-diff {
+  padding: 0.125rem 0.5rem;
+  border-radius: 9999px;
+  background: #f1f5f9;
+  font-size: 0.6875rem;
+  color: #475569;
+}
+.rv-diff.mudou {
+  background: #e6f4ea;
+  color: #146c2e;
+}
+.rv-diff s {
+  color: #b3261e;
+}
+.rv-obs {
+  font-size: 0.6875rem;
+  font-style: italic;
+  color: #334155;
+}
+.rv-alerta {
+  font-size: 0.6875rem;
+  font-weight: 600;
+  color: #b06000;
+}
+.rv-acoes {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.375rem;
+}
+.rv-acoes input {
+  flex: 1;
+  min-width: 10rem;
+  padding: 0.375rem 0.75rem;
+  border: 1px solid #cbd5e1;
+  border-radius: 9999px;
+  font-size: 0.6875rem;
+}
+.rv-aprovar,
+.rv-recusar {
+  padding: 0.375rem 0.875rem;
+  border-radius: 9999px;
+  font-size: 0.6875rem;
+  font-weight: 700;
+}
+.rv-aprovar {
+  background: #146c2e;
+  color: #ffffff;
+}
+.rv-recusar {
+  background: #fce8e6;
+  color: #b3261e;
+}
+.rv-historico {
+  padding: 0.5rem 0.875rem;
+  font-size: 0.6875rem;
+  color: #475569;
+}
+.rv-status {
+  margin-right: 0.25rem;
+  padding: 0 0.375rem;
+  border-radius: 9999px;
+  font-size: 0.625rem;
+  font-weight: 700;
+}
+.rv-status.ok {
+  background: #e6f4ea;
+  color: #146c2e;
+}
+.rv-status.nao {
+  background: #fce8e6;
+  color: #b3261e;
+}
+.selo-revisoes {
+  margin-left: 0.375rem;
+  padding: 0 0.375rem;
+  border-radius: 9999px;
+  background: #b3261e;
+  color: #ffffff;
+  font-size: 0.625rem;
+  font-weight: 700;
 }
 /* Campo de apartamentos vazio/inválido: aviso junto ao campo (o toast fica sob o teclado do celular) */
 input.campo-invalido,

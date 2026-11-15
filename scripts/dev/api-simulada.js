@@ -150,6 +150,9 @@
     return p;
   }
 
+  const revisoes = [];
+  let seqRevisao = 0;
+
   const ROTAS = {
     "auth/logout": () => ({ mensagem: "Sessão simulada encerrada." }),
     "auth/refresh": () => ({ sessionToken: "token-local", expiraEm: Date.now() + 3600000 }),
@@ -237,6 +240,61 @@
         idPredio: predio.idPredio, numeroTerritorio: t.numero, aptosTrabalhados: predio.aptosTrabalhados.slice(),
         mensagem: `${lista.length} apartamento(s) registrado(s) como trabalhado(s) neste prédio.`
       };
+    },
+
+    // Revisão de cadastro de prédios (andares × aptos por andar), como no backend real
+    "predios/sugerir-cadastro": p => {
+      const t = acharTerritorio(p.numeroTerritorio);
+      exigirPosse(t);
+      const predio = acharPredio(t, p.idPredio);
+      const a = Number(p.andares), b = Number(p.aptosPorAndar);
+      if (!Number.isInteger(a) || a < 1 || a > 60 || !Number.isInteger(b) || b < 1 || b > 12) {
+        throw erro(400, "Informe andares (1 a 60) e apartamentos por andar (1 a 12).");
+      }
+      revisoes.filter(r => r.idPredio === predio.idPredio && r.status === "PENDENTE").forEach(r => { r.status = "SUBSTITUIDA"; });
+      const admin = perfil === "ADMIN";
+      const rev = {
+        idRevisao: "REV-" + String(++seqRevisao).padStart(4, "0"), criadaEm: hoje(), idPredio: predio.idPredio,
+        numeroTerritorio: t.numero, nomeEdificio: predio.nomeEdificio, endereco: predio.endereco || "", autor: usuario.nome,
+        antes: { andares: Number(predio.andares || 0), aptosPorAndar: Number(predio.aptosPorAndar || 0), apartamentos: Number(predio.apartamentos || 0) },
+        proposto: { andares: a, aptosPorAndar: b, apartamentos: a * b }, observacao: String(p.observacao || "").slice(0, 200),
+        status: admin ? "APROVADA" : "PENDENTE", revisor: admin ? usuario.nome : "", revisadaEm: admin ? hoje() : "", motivo: ""
+      };
+      revisoes.push(rev);
+      if (admin) Object.assign(predio, { andares: a, aptosPorAndar: b, apartamentos: a * b, revisaoPendente: null });
+      else predio.revisaoPendente = { andares: a, aptosPorAndar: b, criadaEm: hoje() };
+      registrar(admin ? "PREDIO_CADASTRO_ATUALIZADO" : "PREDIO_CADASTRO_SUGERIDO", t.numero, predio.idPredio);
+      return {
+        idRevisao: rev.idRevisao, aplicada: admin, idPredio: predio.idPredio, numeroTerritorio: t.numero, andares: a, aptosPorAndar: b,
+        mensagem: admin ? "Cadastro do prédio atualizado." : "Sugestão enviada. Um administrador vai revisar antes de mudar o cadastro."
+      };
+    },
+
+    "admin/predios/revisoes": () => {
+      const atual = id => { for (const t of territorios) for (const x of t.predios || []) if (x.idPredio === id) return x; return null; };
+      const comAtual = r => {
+        const x = atual(r.idPredio);
+        const a = x ? { andares: Number(x.andares || 0), aptosPorAndar: Number(x.aptosPorAndar || 0), apartamentos: Number(x.apartamentos || 0) } : null;
+        return Object.assign({}, r, { atual: a, cadastroMudou: Boolean(a && JSON.stringify(a) !== JSON.stringify(r.antes)) });
+      };
+      return {
+        pendentes: copiar(revisoes.filter(r => r.status === "PENDENTE").map(comAtual)),
+        decididas: copiar(revisoes.filter(r => r.status === "APROVADA" || r.status === "RECUSADA").reverse().slice(0, 30).map(comAtual))
+      };
+    },
+
+    "admin/predios/revisar": p => {
+      const rev = revisoes.find(r => r.idRevisao === p.idRevisao);
+      if (!rev) throw erro(404, "Sugestão não encontrada.");
+      if (rev.status !== "PENDENTE") throw erro(409, "Esta sugestão já foi revisada ou substituída por outra mais nova.");
+      const aprovar = p.decisao === "APROVAR";
+      const t = acharTerritorio(rev.numeroTerritorio);
+      const predio = acharPredio(t, rev.idPredio);
+      if (aprovar) Object.assign(predio, { andares: rev.proposto.andares, aptosPorAndar: rev.proposto.aptosPorAndar, apartamentos: rev.proposto.apartamentos });
+      predio.revisaoPendente = null;
+      Object.assign(rev, { status: aprovar ? "APROVADA" : "RECUSADA", revisor: usuario.nome, revisadaEm: hoje(), motivo: String(p.motivo || "") });
+      registrar(aprovar ? "PREDIO_REVISAO_APROVADA" : "PREDIO_REVISAO_RECUSADA", t.numero, rev.idPredio);
+      return { idRevisao: rev.idRevisao, mensagem: aprovar ? "Sugestão aprovada: cadastro do prédio atualizado." : "Sugestão recusada." };
     },
 
     "quadras/salvar": p => {
