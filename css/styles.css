@@ -185,6 +185,24 @@ body {
   color: #475569;
   -webkit-text-stroke-width: 2.5px;
 }
+/* Nome das estradas rurais (vias-rurais.geojson): só a partir do zoom 14 (classe posta por js/map.js) */
+.rotulo-mapa > .rotulo-via {
+  display: none;
+  font-size: 11px;
+  font-weight: 600;
+  font-style: italic;
+  color: #57351a;
+  -webkit-text-stroke-width: 2.5px;
+}
+.vias-nomes-visiveis .rotulo-mapa > .rotulo-via {
+  display: block;
+}
+
+/* Fundo "Sem mapa": nenhum ladrilho (uso sem internet); cor neutra de papel */
+.leaflet-container.mapa-sem-fundo {
+  background: #f3efe6;
+}
+
 .rotulo-mapa > .rotulo-vizinho {
   font-size: calc(var(--rotulo-px, 12px) * 0.85);
   font-weight: 700;
