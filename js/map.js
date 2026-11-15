@@ -33,12 +33,18 @@ const MapaTerritorios = {
   CHAVE_ESRI: "",
   FALHAS_SATELITE_PARA_DESISTIR: 4,
   ZOOM_MIN_DETALHES: 15,          // quadras numeradas e pinos de prédios só a partir deste zoom
-  VERSAO_QUADRAS_GEO: 21,         // manter igual à VERSAO de sw.js
+  VERSAO_QUADRAS_GEO: 22,         // manter igual à VERSAO de sw.js (vale também para vias-rurais.geojson)
+  ZOOM_MIN_NOMES_VIAS: 14,        // nomes das estradas rurais só a partir deste zoom
+  ATRIBUICAO_OSM: '&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener noreferrer">OpenStreetMap</a> contributors',
   _localizacao: new Map(),        // mapa -> estado do "minha posição" (GPS)
   _mapasComCamadas: [],           // [{ map, camadas }] para sincronizar a preferência entre os mapas
   rotulosLayerGroup: null,
   quadrasGeoLayer: null,          // mapa geral
   modalQuadrasGeoLayer: null,     // mapa do cartão
+  modalViasRuraisLayer: null,     // estradas do OSM no cartão rural (vias-rurais.geojson)
+  _rendererVias: null,
+  _viasRurais: null,              // Map(numeroTerritorio → [via])
+  _viasRuraisPromessa: null,
   modalContextoLayer: null,       // máscara do entorno + territórios vizinhos
   minimapa: null,
   minimapaLayer: null,
@@ -119,10 +125,21 @@ const MapaTerritorios = {
     this.modalLayerGroup = L.featureGroup().addTo(this.modalMap);
     this.modalQuadrasGeoLayer = L.layerGroup().addTo(this.modalMap);
     this.quadrasLayerGroup = L.featureGroup().addTo(this.modalMap);
-    this.criarCamadasBase(this.modalMap, { "Quadras numeradas": this.modalQuadrasGeoLayer });
+    // Estradas rurais: canvas num pane abaixo dos polígonos (leve com centenas de trechos).
+    // O grupo leva o crédito do OSM, que assim aparece também sobre o satélite e o "Sem mapa".
+    this._rendererVias = L.canvas({ pane: "viasRurais", padding: 0.3 });
+    this.modalViasRuraisLayer = L.layerGroup([], { attribution: this.ATRIBUICAO_OSM }).addTo(this.modalMap);
+    this.criarCamadasBase(this.modalMap, {
+      "Quadras numeradas": this.modalQuadrasGeoLayer,
+      "Estradas (rurais)": this.modalViasRuraisLayer
+    });
     this.criarMinimapa(this.modalMap);
 
-    this.modalMap.on("zoomend", () => this.atualizarRotulos(this.modalMap, this._rotulosModal));
+    this.modalMap.on("zoomend", () => {
+      this.atualizarRotulos(this.modalMap, this._rotulosModal);
+      this.atualizarNomesVias(this.modalMap);
+    });
+    this.atualizarNomesVias(this.modalMap);
     this.modalMap.on("click", evento => this.aoClicarMapaModal(evento));
     this.modalInicializado = true;
   },
@@ -140,6 +157,7 @@ const MapaTerritorios = {
       pane.style.zIndex = zIndex;
       pane.style.pointerEvents = "none";
     };
+    criar("viasRurais", 350);       // estradas rurais (canvas), acima do fundo e abaixo dos territórios (400)
     criar("quadrasGeo", 420);       // contornos das quadras, acima dos territórios (400)
     criar("nomesRuas", 450);        // nomes de rua da camada base acima dos polígonos
     criar("rotulosQuadras", 590);   // números das quadras, abaixo dos pinos/alfinetes (600)
@@ -156,7 +174,7 @@ const MapaTerritorios = {
 
   /** Camadas de fundo (uma instância por mapa). O ladrilho de nomes de rua fica acima dos polígonos. */
   criarLadrilhosBase() {
-    const osm = '&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener noreferrer">OpenStreetMap</a> contributors';
+    const osm = this.ATRIBUICAO_OSM;
     // Os basemaps da CARTO (Positron/Voyager) passaram a exigir chave de API; por isso o fundo
     // claro é o próprio ladrilho do OpenStreetMap dessaturado por CSS (.ladrilhos-claros).
     const ladrilhoOsm = opcoes => L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", Object.assign({
@@ -172,8 +190,19 @@ const MapaTerritorios = {
       "Mapa claro": ladrilhoOsm({ className: "ladrilhos-claros" }),
       "Ruas": ladrilhoOsm(),
       // No satélite, os nomes das vias vêm num ladrilho transparente desenhado acima dos polígonos
-      "Satélite": grupoSatelite
+      "Satélite": grupoSatelite,
+      // Sem ladrilhos: fundo neutro para usar sem internet (estradas rurais, contorno e "minha posição")
+      "Sem mapa": this.criarFundoNeutro()
     };
+  },
+
+  /** Camada vazia que só troca a cor de fundo do mapa enquanto está ativa. */
+  criarFundoNeutro() {
+    const FundoNeutro = L.Layer.extend({
+      onAdd(map) { map.getContainer().classList.add("mapa-sem-fundo"); },
+      onRemove(map) { map.getContainer().classList.remove("mapa-sem-fundo"); }
+    });
+    return new FundoNeutro();
   },
 
   /** Foto de satélite + ladrilho transparente de nomes de vias, conforme haja ou não chave da Esri. */
@@ -716,6 +745,98 @@ const MapaTerritorios = {
     });
   },
 
+  /**
+   * ==========================================================================
+   * ESTRADAS RURAIS (vias-rurais.geojson, gerado por scripts/rurais/gerar-vias-rurais.js)
+   * Dados públicos do OpenStreetMap, guardados pelo service worker: funcionam sem internet.
+   * Desenhadas em canvas, sem interação (o clique atravessa até o mapa).
+   * ==========================================================================
+   */
+  carregarViasRurais() {
+    if (!this._viasRuraisPromessa) {
+      this._viasRuraisPromessa = fetch(`vias-rurais.geojson?v=${this.VERSAO_QUADRAS_GEO}`)
+        .then(resposta => (resposta.ok ? resposta.json() : Promise.reject(new Error(`HTTP ${resposta.status}`))))
+        .then(geo => { this._viasRurais = this.indexarViasRurais(geo); })
+        .catch(() => {
+          // Sem o arquivo o cartão segue só com o fundo e o contorno; tenta de novo na próxima abertura
+          this._viasRurais = new Map();
+          this._viasRuraisPromessa = null;
+        });
+    }
+    return this._viasRuraisPromessa || Promise.resolve();
+  },
+
+  /** Map(numeroTerritorio → [{ classe, nome, superficie, pontos: [[lat, lng], ...] }]) */
+  indexarViasRurais(geo) {
+    const indice = new Map();
+    for (const f of (geo && geo.features) || []) {
+      const p = f.properties || {};
+      const g = f.geometry || {};
+      if (g.type !== "LineString" || !Array.isArray(g.coordinates) || g.coordinates.length < 2) continue;
+      const numero = Number(p.NUM_TERR);
+      if (!indice.has(numero)) indice.set(numero, []);
+      indice.get(numero).push({
+        classe: String(p.h || ""),
+        nome: String(p.n || ""),
+        superficie: String(p.s || ""),
+        pontos: g.coordinates.map(c => [c[1], c[0]])
+      });
+    }
+    return indice;
+  },
+
+  /** Estilo da estrada: asfalto mais grosso; terra em marrom tracejado; carreador fino. */
+  estiloVia(via) {
+    const terra = /^(unpaved|dirt|earth|ground|gravel|fine_gravel|compacted|sand|grass|mud|pebblestone|rock)$/.test(via.superficie);
+    const c = via.classe.replace(/_link$/, "");
+    if (c === "motorway" || c === "trunk" || c === "primary") return { color: "#b45309", weight: 5, dashArray: null };
+    if (c === "secondary" || c === "tertiary") return { color: terra ? "#92400e" : "#d97706", weight: 4, dashArray: terra ? "8 5" : null };
+    if (c === "track") return { color: "#92400e", weight: 1.8, dashArray: "3 4" };
+    if (c === "service") return { color: terra ? "#a16207" : "#78716c", weight: 2, dashArray: terra ? "5 4" : null };
+    // unclassified (estradas municipais), residential, road, living_street
+    return { color: terra ? "#92400e" : "#57534e", weight: 3, dashArray: terra ? "7 5" : null };
+  },
+
+  /** Desenha as estradas do território aberto no cartão — só para território rural (tipo da BASE). */
+  renderizarViasRuraisModal(t) {
+    if (!this.modalViasRuraisLayer) return;
+    this.modalViasRuraisLayer.clearLayers();
+    if (!t || !this.ehRural(t)) return;
+    const numero = Number(t.numero);
+    this.carregarViasRurais().then(() => {
+      if (numero !== this.territorioModalAtual || !this._viasRurais) return;
+      this.modalViasRuraisLayer.clearLayers();
+      const vias = this._viasRurais.get(numero) || [];
+      const base = { renderer: this._rendererVias, interactive: false, lineCap: "round", lineJoin: "round" };
+      // Contorno claro por baixo: contraste sobre o satélite e sobre o fundo neutro
+      for (const via of vias) {
+        const e = this.estiloVia(via);
+        this.modalViasRuraisLayer.addLayer(L.polyline(via.pontos, Object.assign({}, base, { color: "#ffffff", weight: e.weight + 2.5, opacity: 0.8 })));
+      }
+      for (const via of vias) {
+        this.modalViasRuraisLayer.addLayer(L.polyline(via.pontos, Object.assign({}, base, this.estiloVia(via), { opacity: 0.95 })));
+      }
+      // Nome de cada estrada uma vez, no meio do trecho mais longo com aquele nome
+      const maisLongo = new Map();
+      for (const via of vias) {
+        if (!via.nome) continue;
+        const atual = maisLongo.get(via.nome);
+        if (!atual || via.pontos.length > atual.pontos.length) maisLongo.set(via.nome, via);
+      }
+      for (const via of maisLongo.values()) {
+        const meio = via.pontos[Math.floor(via.pontos.length / 2)];
+        this.modalViasRuraisLayer.addLayer(this.criarRotulo(meio[0], meio[1], via.nome, "rotulo-via", "rotulosQuadras"));
+      }
+      this.atualizarNomesVias(this.modalMap);
+    });
+  },
+
+  /** Nomes das estradas só de perto (classe no contêiner; o CSS esconde abaixo do zoom mínimo). */
+  atualizarNomesVias(map) {
+    if (!map) return;
+    map.getContainer().classList.toggle("vias-nomes-visiveis", map.getZoom() >= this.ZOOM_MIN_NOMES_VIAS);
+  },
+
   /** Minimapa de localização no canto do mapa do cartão (some em telas estreitas, via CSS). */
   criarMinimapa(mapaPai) {
     const self = this;
@@ -1073,6 +1194,7 @@ const MapaTerritorios = {
     this.renderizarListaPrediosModal(t, pontos);
     this.renderizarQuadrasModal();
     this.renderizarQuadrasGeoModal();
+    this.renderizarViasRuraisModal(t);
     this.atualizarRotulos(this.modalMap, this._rotulosModal);
 
     this.renderizarBarraOffline();

@@ -9,7 +9,7 @@
  * - Ladrilhos de mapa (outras origens) seguem direto para a rede, exceto quando existe um pacote
  *   offline baixado (js/pacote-offline.js): aí o ladrilho guardado é servido primeiro.
  */
-const VERSAO = 21;
+const VERSAO = 22;
 const PREFIXO_CACHE = "territorios-pwa-shell-";
 const PREFIXO_PACOTE = "territorios-tiles-";   // pacotes offline de ladrilhos, um cache por território
 const DOWNLOADS_PARALELOS = 6;
@@ -26,6 +26,7 @@ const STATIC_ASSETS = [
   "./vendor/qrcode-generator-1.4.4/qrcode.js",
   `./js/geo.js?v=${VERSAO}`,
   `./quadras.geojson?v=${VERSAO}`,
+  `./vias-rurais.geojson?v=${VERSAO}`,
   `./js/frame-guard.js?v=${VERSAO}`,
   `./js/utils.js?v=${VERSAO}`,
   `./js/api.js?v=${VERSAO}`,

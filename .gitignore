@@ -22,6 +22,9 @@ scripts/quadras/.cache/
 # Configuração local do modo de desenvolvimento (contém a chave de mapas da Esri)
 scripts/dev/config.local.json
 
+# Cache local das vias do OSM para os territórios rurais (scripts/rurais/gerar-vias-rurais.js)
+scripts/rurais/.cache/
+
 # Dados geográficos com localização de residências (LGPD, spec 07) — nunca versionar
 # (ex.: exportações do Google My Maps / Google Earth)
 kml/

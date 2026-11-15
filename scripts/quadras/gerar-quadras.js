@@ -18,6 +18,7 @@ const fs = require("fs");
 const os = require("os");
 const path = require("path");
 const Geo = require("../../js/geo.js");
+const Osm = require("../lib/overpass.js");
 
 const RAIZ = path.resolve(__dirname, "..", "..");
 
@@ -41,11 +42,6 @@ const PADROES = {
     "secondary_link", "tertiary_link"]
 };
 
-const SERVIDORES_OVERPASS = [
-  "https://overpass-api.de/api/interpreter",
-  "https://overpass.kumi.systems/api/interpreter",
-  "https://overpass.private.coffee/api/interpreter"
-];
 // Superconjunto baixado (o filtro fino é local, para ajustar parâmetros sem baixar de novo)
 const VIAS_BAIXADAS = PADROES.vias.concat(["service", "track"]);
 
@@ -94,67 +90,14 @@ Gera quadras.geojson a partir das ruas do OpenStreetMap.
 // ---------------------------------------------------------------------------------------------
 // 1. Territórios
 // ---------------------------------------------------------------------------------------------
-function carregarTerritorios(arquivo) {
-  const geo = JSON.parse(fs.readFileSync(arquivo, "utf8"));
-  return geo.features.map(f => {
-    const g = f.geometry;
-    const poligonos = g.type === "Polygon" ? [g.coordinates] : g.coordinates;
-    return {
-      numero: Number(f.properties.NUM_TERR),
-      // partes[i] = [externo, ...furos] em [lng, lat] (sem Z)
-      partes: poligonos.map(pol => pol.map(anel => anel.map(c => [c[0], c[1]])))
-    };
-  }).sort((a, b) => a.numero - b.numero);
-}
+const carregarTerritorios = Osm.carregarTerritorios;
 
 // ---------------------------------------------------------------------------------------------
-// 2. Malha viária (Overpass API com cache local, novas tentativas e servidores alternativos)
+// 2. Malha viária (Overpass API com cache local — scripts/lib/overpass.js)
 // ---------------------------------------------------------------------------------------------
-const esperar = ms => new Promise(r => setTimeout(r, ms));
-
-async function baixarMalhaViaria(caixa, op) {
-  // caixa = [sul, oeste, norte, leste] arredondada para fora em 0,005° (~500 m)
-  const chave = caixa.map(v => v.toFixed(3)).join("_");
-  const arquivo = path.join(op.cache, `overpass_${chave}.json`);
-  if (!op.atualizarOsm && fs.existsSync(arquivo)) {
-    const dados = JSON.parse(fs.readFileSync(arquivo, "utf8"));
-    console.log(`Malha viária: cache local (${dados.elements.length} vias, baixado em ${dados._baixadoEm || "?"}).`);
-    return dados;
-  }
-
-  const consulta = `[out:json][timeout:120];way["highway"~"^(${VIAS_BAIXADAS.join("|")})$"](${caixa.join(",")});out tags geom;`;
-  let ultimoErro = null;
-  for (let tentativa = 0; tentativa < 6; tentativa++) {
-    const servidor = SERVIDORES_OVERPASS[tentativa % SERVIDORES_OVERPASS.length];
-    if (tentativa > 0) {
-      const espera = Math.min(60000, 4000 * 2 ** (tentativa - 1));
-      console.log(`  nova tentativa em ${espera / 1000}s (${ultimoErro})...`);
-      await esperar(espera);
-    }
-    try {
-      console.log(`Malha viária: consultando ${new URL(servidor).host}...`);
-      const resposta = await fetch(servidor, {
-        method: "POST",
-        headers: { "Content-Type": "application/x-www-form-urlencoded", "User-Agent": "gerar-quadras/1.0 (script offline)" },
-        body: "data=" + encodeURIComponent(consulta),
-        signal: AbortSignal.timeout(150000)
-      });
-      if (!resposta.ok) throw new Error(`HTTP ${resposta.status}`);
-      const dados = JSON.parse(await resposta.text());
-      if (!Array.isArray(dados.elements)) throw new Error("resposta sem 'elements'");
-      if (dados.remark && /error|timed out/i.test(dados.remark)) throw new Error(dados.remark);
-      dados._baixadoEm = new Date().toISOString();
-      dados._caixa = caixa;
-      fs.mkdirSync(op.cache, { recursive: true });
-      fs.writeFileSync(arquivo, JSON.stringify(dados));
-      console.log(`Malha viária: ${dados.elements.length} vias baixadas e guardadas em cache.`);
-      return dados;
-    } catch (e) {
-      ultimoErro = e.message;
-    }
-  }
-  throw new Error(`Não foi possível baixar a malha viária da Overpass API: ${ultimoErro}`);
-}
+const baixarMalhaViaria = (caixa, op) => Osm.baixarMalhaViaria(caixa, {
+  tipos: VIAS_BAIXADAS, cache: op.cache, atualizarOsm: op.atualizarOsm, agente: "gerar-quadras/1.0 (script offline)"
+});
 
 // ---------------------------------------------------------------------------------------------
 // 3. Poligonização: faces do grafo planar formado por ruas + limites dos territórios
@@ -381,30 +324,14 @@ async function principal() {
   if (op.ajuda) { console.log(AJUDA); return; }
 
   const territorios = carregarTerritorios(op.territorios);
-  let latSoma = 0, lngSoma = 0, cont = 0;
-  for (const t of territorios) for (const parte of t.partes) for (const c of parte[0]) { lngSoma += c[0]; latSoma += c[1]; cont++; }
-
   // Classificação urbano/rural: o geojson não traz o tipo, então usa-se a área (com exceções manuais)
-  const projPrevia = Geo.criarProjecao(latSoma / cont, lngSoma / cont);
-  for (const t of territorios) {
-    t.areaM2 = t.partes.reduce((s, parte) => s + Geo.areaPoligono(parte.map(anel => anel.map(c => projPrevia.paraXY(c[1], c[0])))), 0);
-    t.urbano = op.urbanos.has(t.numero) || (!op.rurais.has(t.numero) && t.areaM2 <= op.areaMaxUrbanoHa * 1e4);
-  }
+  Osm.classificarPorArea(territorios, op);
   const urbanos = territorios.filter(t => t.urbano);
   const rurais = territorios.filter(t => !t.urbano);
   if (!urbanos.length) throw new Error("Nenhum território urbano encontrado.");
 
   // Caixa delimitadora dos urbanos (+ margem), arredondada para fora
-  let sul = Infinity, oeste = Infinity, norte = -Infinity, leste = -Infinity;
-  for (const t of urbanos) for (const parte of t.partes) for (const c of parte[0]) {
-    if (c[1] < sul) sul = c[1];
-    if (c[1] > norte) norte = c[1];
-    if (c[0] < oeste) oeste = c[0];
-    if (c[0] > leste) leste = c[0];
-  }
-  const passo = 0.005;
-  const caixa = [Math.floor(sul / passo) * passo - passo, Math.floor(oeste / passo) * passo - passo,
-    Math.ceil(norte / passo) * passo + passo, Math.ceil(leste / passo) * passo + passo].map(v => Number(v.toFixed(3)));
+  const caixa = Osm.caixaDosTerritorios(urbanos);
   console.log(`Territórios: ${territorios.length} (${urbanos.length} urbanos, ${rurais.length} rurais — só contorno).`);
   console.log(`Caixa enviada à Overpass (S,O,N,L): ${caixa.join(", ")}`);
 
