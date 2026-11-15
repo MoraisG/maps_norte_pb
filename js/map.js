@@ -33,7 +33,7 @@ const MapaTerritorios = {
   CHAVE_ESRI: "",
   FALHAS_SATELITE_PARA_DESISTIR: 4,
   ZOOM_MIN_DETALHES: 15,          // quadras numeradas e pinos de prédios só a partir deste zoom
-  VERSAO_QUADRAS_GEO: 19,         // manter igual à VERSAO de sw.js
+  VERSAO_QUADRAS_GEO: 20,         // manter igual à VERSAO de sw.js
   _localizacao: new Map(),        // mapa -> estado do "minha posição" (GPS)
   _mapasComCamadas: [],           // [{ map, camadas }] para sincronizar a preferência entre os mapas
   rotulosLayerGroup: null,
@@ -1235,11 +1235,12 @@ const MapaTerritorios = {
       ? `<div class="mt-2 flex items-center gap-1.5">
            <input type="text" data-apto-input="${idPredio}" inputmode="text" autocomplete="off" maxlength="120" placeholder="Ex.: 101, 102, 201" aria-label="Apartamentos trabalhados em ${Utils.escapeHtml(p.nomeEdificio)}" class="flex-1 min-w-0 px-3 py-1.5 rounded-full border border-slate-300 bg-white text-[11px] text-slate-800 focus:outline-none focus:border-[#0b57d0]" />
            <button type="button" data-acao="adicionar-aptos" data-num="${Number(t.numero)}" data-id-predio="${idPredio}" class="shrink-0 px-3 py-1.5 rounded-full bg-[#d3e3fd] hover:bg-[#c2d7fc] text-[#041e49] text-[11px] font-semibold transition">Adicionar</button>
-         </div>`
+         </div>
+         <p class="mp-erro" data-apto-erro="${idPredio}" role="alert" hidden></p>`
       : "";
 
     return `
-      <div data-acao="bloco-aptos" class="mt-2.5 p-2.5 rounded-xl bg-slate-50 border border-slate-200/90 cursor-default">
+      <div data-acao="bloco-aptos" data-escopo-aptos class="mt-2.5 p-2.5 rounded-xl bg-slate-50 border border-slate-200/90 cursor-default">
         <p class="text-[11px] font-bold text-slate-700">🚪 Apartamentos já trabalhados <span class="font-semibold text-slate-500">(${contagem})</span></p>
         ${aptos.length
           ? `<div class="mt-1.5 flex flex-wrap gap-1">${chips}</div>`

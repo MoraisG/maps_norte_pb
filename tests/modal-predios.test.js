@@ -28,7 +28,19 @@ assert.deepStrictEqual(simples(M.gradeSugerida({ andares: 3, apartamentos: 6 }))
 assert.strictEqual(M.gradeSugerida({ andares: 10, apartamentos: 40 }).length, 10);
 assert.deepStrictEqual(simples(M.gradeSugerida({ andares: 12, apartamentos: 24 })[0]), { andar: 12, unidades: ["1201", "1202"] });
 // Sem dado confiável: sem grade (fica só o campo de digitação)
-assert.strictEqual(M.gradeSugerida({ andares: 3, apartamentos: 7 }), null, "total não divide pelos andares");
+// Total que não divide pelos andares: arredonda para cima (39 aptos em 19 andares = 3 por andar)
+assert.deepStrictEqual(simples(M.gradeSugerida({ andares: 3, apartamentos: 7 })[0]), { andar: 3, unidades: ["301", "302", "303"] });
+assert.strictEqual(M.gradeSugerida({ andares: 19, apartamentos: 39 })[0].unidades.length, 3);
+// Escolha feita no aparelho prevalece sobre o cadastro e permite grade sem total cadastrado
+assert.strictEqual(M.gradeSugerida({ andares: 3, apartamentos: 6 }, 4)[0].unidades.length, 4);
+assert.deepStrictEqual(simples(M.gradeSugerida({ andares: 2, apartamentos: 0 }, 2)), [
+  { andar: 2, unidades: ["201", "202"] },
+  { andar: 1, unidades: ["101", "102"] }
+]);
+assert.strictEqual(M.gradeSugerida({ andares: 2, apartamentos: 0 }, 13), null, "escolha fora do limite");
+assert.strictEqual(M.gradeSugerida({ andares: 0, apartamentos: 0 }, 2), null, "sem andares não há grade");
+// Escolha guardada no aparelho: só valores de 1 a 12; localStorage indisponível não quebra
+assert.strictEqual(M.porAndarEscolhido("P1"), 0);
 assert.strictEqual(M.gradeSugerida({ andares: 0, apartamentos: 6 }), null);
 assert.strictEqual(M.gradeSugerida({ andares: 2, apartamentos: 0 }), null);
 assert.strictEqual(M.gradeSugerida({ andares: "", apartamentos: "" }), null);
