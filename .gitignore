@@ -24,3 +24,6 @@ scripts/dev/config.local.json
 
 # Cache local das vias do OSM para os territórios rurais (scripts/rurais/gerar-vias-rurais.js)
 scripts/rurais/.cache/
+
+# Cache local das estradas do OSM para o rascunho de territórios (scripts/territorios/rascunho-limite.js)
+scripts/territorios/.cache/
