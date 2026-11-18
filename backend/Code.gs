@@ -281,6 +281,58 @@ function doPost(e) {
  */
 function rotearRequisicao(metodo, queryParams, body) {
   const payload = metodo === "POST" ? body : queryParams;
+  iniciarMedicao(String((payload && (payload.rota || payload.acao)) || "").trim());
+  try {
+    return rotearRequisicaoInterna(metodo, payload);
+  } finally {
+    registrarMedicaoRequisicao();
+  }
+}
+
+/**
+ * ============================================================================
+ * MEDIÇÃO (Spec 08, fase 0) — só log, nenhuma mudança de comportamento
+ * ============================================================================
+ * Uma linha JSON por requisição no log de execuções do Apps Script:
+ *   { medicao: "requisicao", rota, ms, etapas: { usuarios, esperaLock, dentroLock, base, prog, auditoria }, fontes, ... }
+ * etapas = milissegundos acumulados; fontes.base/prog = "cache" | "planilha" | "fresco" (uma entrada por leitura).
+ * Cada execução do Apps Script atende uma única requisição, então o estado global é por requisição.
+ */
+let MEDICAO_REQ = null;
+
+function iniciarMedicao(rota) {
+  MEDICAO_REQ = { rota: rota, inicio: Date.now(), etapas: {}, fontes: {}, flags: {} };
+}
+
+function medirEtapa(nome, ms) {
+  if (!MEDICAO_REQ) return;
+  MEDICAO_REQ.etapas[nome] = (MEDICAO_REQ.etapas[nome] || 0) + Math.max(0, ms);
+}
+
+function medirFonte(grupo, fonte) {
+  if (!MEDICAO_REQ) return;
+  (MEDICAO_REQ.fontes[grupo] = MEDICAO_REQ.fontes[grupo] || []).push(fonte);
+}
+
+function medirFlag(nome) {
+  if (MEDICAO_REQ) MEDICAO_REQ.flags[nome] = true;
+}
+
+function registrarMedicaoRequisicao() {
+  try {
+    if (!MEDICAO_REQ) return;
+    const linha = { medicao: "requisicao", rota: MEDICAO_REQ.rota, ms: Date.now() - MEDICAO_REQ.inicio, etapas: MEDICAO_REQ.etapas };
+    if (Object.keys(MEDICAO_REQ.fontes).length) linha.fontes = MEDICAO_REQ.fontes;
+    for (const flag in MEDICAO_REQ.flags) linha[flag] = true;
+    console.log(JSON.stringify(linha));
+  } catch (e) {
+    // Medição nunca pode derrubar a requisição
+  } finally {
+    MEDICAO_REQ = null;
+  }
+}
+
+function rotearRequisicaoInterna(metodo, payload) {
   const rota = String(payload.rota || payload.acao || "").trim();
 
   try {
@@ -312,7 +364,9 @@ function rotearRequisicao(metodo, queryParams, body) {
     }
 
     // 2. AUTORIZAÇÃO EM TEMPO REAL (Revalida status ATIVO e Perfil na aba Usuarios)
+    const inicioUsuarios = Date.now();
     const usuario = buscarUsuarioAutorizado(sessao.email);
+    medirEtapa("usuarios", Date.now() - inicioUsuarios);
     if (!usuario || usuario.status !== "ATIVO") {
       revogarSessao(tokenSessao, sessao.email);
       registrarAuditoria("ACESSO_REVOGADO", sessao.nome, sessao.email, "-", "NEGADO", "Usuário inativado ou removido da whitelist");
@@ -444,6 +498,7 @@ function rotearRequisicao(metodo, queryParams, body) {
       return respostaJson({ sucesso: false, codigo: 403, erro: "403 Forbidden — Operação exclusiva para perfil ADMIN." });
     }
     Logger.log("Erro na API: " + err.stack);
+    medirFlag("erro500");
     return respostaJson({ sucesso: false, codigo: 500, erro: "Erro interno ao processar a solicitação." });
   }
 }
@@ -875,14 +930,21 @@ function gravarConsolidacaoEmCache(grupo, objeto, geracaoLida) {
  * Etapa 1 (BASE). fresco = true ignora o cache e não grava nele (uso das transações).
  */
 function obterBaseTerritorios(fresco) {
+  const inicio = Date.now();
   if (!fresco) {
     const emCache = lerConsolidacaoEmCache("BASE");
-    if (emCache) return emCache;
+    if (emCache) {
+      medirFonte("base", "cache");
+      medirEtapa("base", Date.now() - inicio);
+      return emCache;
+    }
   }
   const geracao = fresco ? "" : lerGeracaoListagem("BASE");
   const base = consolidarBaseTerritorios();
   base.versao = resumirConteudo(JSON.stringify(base.territorios));
   if (!fresco) gravarConsolidacaoEmCache("BASE", base, geracao);
+  medirFonte("base", fresco ? "fresco" : "planilha");
+  medirEtapa("base", Date.now() - inicio);
   return base;
 }
 
@@ -890,9 +952,14 @@ function obterBaseTerritorios(fresco) {
  * Etapa 2 (PROGRESSO): prédios do cartão e alfinetes de quadras, por número de território.
  */
 function obterProgressoCampo(fresco, base) {
+  const inicio = Date.now();
   if (!fresco) {
     const emCache = lerConsolidacaoEmCache("PROG");
-    if (emCache) return emCache;
+    if (emCache) {
+      medirFonte("prog", "cache");
+      medirEtapa("prog", Date.now() - inicio);
+      return emCache;
+    }
   }
   const geracao = fresco ? "" : lerGeracaoListagem("PROG");
   const ss = SpreadsheetApp.getActiveSpreadsheet();
@@ -908,6 +975,8 @@ function obterProgressoCampo(fresco, base) {
   };
   progresso.versao = resumirConteudo(JSON.stringify([progresso.predios, progresso.quadras, progresso.pontos]));
   if (!fresco) gravarConsolidacaoEmCache("PROG", progresso, geracao);
+  medirFonte("prog", fresco ? "fresco" : "planilha");
+  medirEtapa("prog", Date.now() - inicio);
   return progresso;
 }
 
@@ -1279,18 +1348,24 @@ function onEdit() {
  */
 function executarComLock(callbackTransacional, gruposCache) {
   const lock = LockService.getScriptLock();
-  if (!lock.tryLock(15000)) {
+  const inicioEspera = Date.now();
+  const obteve = lock.tryLock(15000);
+  medirEtapa("esperaLock", Date.now() - inicioEspera);
+  if (!obteve) {
+    medirFlag("lock429");
     return respostaJson({
       sucesso: false,
       codigo: 429,
       erro: "Concorrência detectada: outro dirigente está registrando uma operação neste exato instante. Aguarde alguns segundos e tente novamente."
     });
   }
+  const inicioLock = Date.now();
   try {
     return callbackTransacional();
   } finally {
     invalidarCacheListagem(gruposCache);
     lock.releaseLock();
+    medirEtapa("dentroLock", Date.now() - inicioLock);
   }
 }
 
@@ -1787,6 +1862,7 @@ function listarAuditoriaAdmin(limite) {
 }
 
 function registrarAuditoria(acao, nomeUsuario, emailUsuario, territorio, resultado, detalhes) {
+  const inicio = Date.now();
   try {
     const ss = SpreadsheetApp.getActiveSpreadsheet();
     let sheet = ss.getSheetByName("Auditoria");
@@ -1806,6 +1882,8 @@ function registrarAuditoria(acao, nomeUsuario, emailUsuario, territorio, resulta
     ], 500));
   } catch (e) {
     Logger.log("Falha ao gravar auditoria: " + e.message);
+  } finally {
+    medirEtapa("auditoria", Date.now() - inicio);
   }
 }
 
