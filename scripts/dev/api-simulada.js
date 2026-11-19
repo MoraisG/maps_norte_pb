@@ -132,6 +132,14 @@
     });
   }
 
+  /** Mesmos e-mails de admin/usuarios/listar: usuario1..N@exemplo.test para os OUTROS. */
+  function nomeDoUsuarioSimulado(email) {
+    if (email === usuario.email) return usuario.nome;
+    const i = OUTROS.findIndex((_, idx) => email === `usuario${idx + 1}@exemplo.test`);
+    if (i < 0) throw erro(400, "Selecione um dirigente cadastrado na whitelist.");
+    return OUTROS[i];
+  }
+
   function acharTerritorio(numero) {
     const t = territorios.find(x => x.numero === Number(numero));
     if (!t) throw erro(404, "Território não encontrado.");
@@ -344,6 +352,35 @@
       usuarios: [Object.assign({ ultimaAtividade: "Agora (simulação)" }, usuario)]
         .concat(OUTROS.map((nome, i) => ({ id: i + 2, nome: nome, email: `usuario${i + 1}@exemplo.test`, perfil: "PUBLICADOR", status: "ATIVO", ultimaAtividade: "" })))
     }),
+    "admin/territorios/designar": p => {
+      const t = acharTerritorio(p.numeroTerritorio);
+      const nome = nomeDoUsuarioSimulado(p.emailDirigente);
+      if (t.statusReal === "OCUPADO") throw erro(409, `O território ${t.numero} já está com ${t.dirigente}. Use "Transferir" para trocar o dirigente.`);
+      const data = String(p.dataInicio || "");
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(data) || data > hoje()) throw erro(400, "Informe uma data de início válida (não pode ser no futuro).");
+      if (t.ultimaAcao === "Devolver" && t.ultimaData && data < t.ultimaData) throw erro(400, `A data de início não pode ser anterior à última devolução (${Utils.formatarDataBr(t.ultimaData)}).`);
+      const meu = p.emailDirigente === usuario.email;
+      Object.assign(t, { statusReal: "OCUPADO", ultimaAcao: "Solicitar", ultimaData: data, dirigente: nome, emailDirigente: p.emailDirigente, emMinhaPosse: meu });
+      t.ciclos.push({ dirigente: nome, dataDesignacao: data, dataConclusao: "" });
+      if (meu) movimentar(t, "Solicitar");
+      registrar("ADMIN_DESIGNAR_TERRITORIO", t.numero, `Designado a ${nome} com início em ${Utils.formatarDataBr(data)}`);
+      return { mensagem: `Território ${t.numero} (${t.bairro}) designado a ${nome} com início em ${Utils.formatarDataBr(data)}.` };
+    },
+    "admin/territorios/transferir": p => {
+      const t = acharTerritorio(p.numeroTerritorio);
+      const nome = nomeDoUsuarioSimulado(p.emailDirigente);
+      if (t.statusReal !== "OCUPADO") throw erro(409, `O território ${t.numero} não está em campo. Use "Designar".`);
+      if (t.dirigente === nome) throw erro(400, `O território ${t.numero} já está com ${nome}.`);
+      const anterior = t.dirigente;
+      if (t.emMinhaPosse) movimentar(t, "Transferido");
+      const meu = p.emailDirigente === usuario.email;
+      Object.assign(t, { dirigente: nome, emailDirigente: p.emailDirigente, emMinhaPosse: meu });
+      const cicloAberto = t.ciclos[t.ciclos.length - 1];
+      if (cicloAberto) cicloAberto.dirigente = nome;
+      if (meu) movimentar(t, "Solicitar");
+      registrar("ADMIN_TRANSFERIR_TERRITORIO", t.numero, `De ${anterior} para ${nome} | início mantido em ${Utils.formatarDataBr(t.ultimaData)}`);
+      return { mensagem: `Território ${t.numero} (${t.bairro}) transferido de ${anterior} para ${nome}. Início do trabalho mantido em ${Utils.formatarDataBr(t.ultimaData)}.` };
+    },
     "admin/auditoria": () => ({ logs: copiar(auditoria) }),
     "admin/usuarios/salvar": () => ({ mensagem: "Simulação: o usuário não foi gravado (modo local)." }),
     "admin/lembretes/disparar": () => ({ mensagem: "Simulação: nenhum e-mail foi enviado (modo local)." })

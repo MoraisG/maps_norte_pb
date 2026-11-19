@@ -404,6 +404,18 @@ function rotearRequisicao(metodo, queryParams, body) {
         exigirPerfilAdmin(usuario, rota);
         return executarComLock(() => salvarOuAlterarUsuarioAdmin(usuario, payload.dadosUsuario), []);
 
+      // Designação direta de um cartão a um dirigente (fora da fila), com data de início informada
+      case "admin/territorios/designar":
+        if (metodo !== "POST") return erroMetodoNaoPermitido();
+        exigirPerfilAdmin(usuario, rota);
+        return executarComLock(() => designarTerritorioAdminTransacional(usuario, payload));
+
+      // Troca o dirigente de um cartão em campo, mantendo a data de início do trabalho
+      case "admin/territorios/transferir":
+        if (metodo !== "POST") return erroMetodoNaoPermitido();
+        exigirPerfilAdmin(usuario, rota);
+        return executarComLock(() => transferirTerritorioAdminTransacional(usuario, payload));
+
       case "admin/pontos/importar":
         if (metodo !== "POST") return erroMetodoNaoPermitido();
         exigirPerfilAdmin(usuario, rota);
@@ -1501,21 +1513,7 @@ function devolverTerritorioTransacional(usuario, payload) {
   // Regra "Não Iniciado": cancela a solicitação aberta sem gerar data de início nem de conclusão,
   // retornando imediatamente à fila como DISPONÍVEL com sua antiguidade original preservada.
   if (!foiCompleto && motivoRaw === "NAO_INICIADO") {
-    const dadosResp = sheetResp.getDataRange().getValues();
-    let linhaSolicitacaoAberta = -1;
-    let maxTs = -1;
-
-    for (let i = dadosResp.length - 1; i >= 1; i--) {
-      const nLinha = String(dadosResp[i][2] || "").trim().replace(/^0+/, "");
-      const acaoLinha = String(dadosResp[i][3] || "").trim();
-      if (nLinha === num && acaoLinha === "Solicitar") {
-        const tsLinha = extrairTimestamp(dadosResp[i][0]) || extrairTimestamp(dadosResp[i][4]) || i;
-        if (tsLinha >= maxTs) {
-          maxTs = tsLinha;
-          linhaSolicitacaoAberta = i + 1;
-        }
-      }
-    }
+    const linhaSolicitacaoAberta = localizarLinhaSolicitacaoAberta(sheetResp.getDataRange().getValues(), num);
 
     if (linhaSolicitacaoAberta > 0) {
       sheetResp.getRange(linhaSolicitacaoAberta, 4).setValue("Cancelado_NaoIniciado");
@@ -1564,6 +1562,197 @@ function devolverTerritorioTransacional(usuario, payload) {
     statusRetorno: "RECENTE",
     cicloPrediosCompleto: progresso.cicloPrediosCompleto,
     mensagem: `Devolução do território ${num} (${territorio.bairro}) registrada como concluída! O cartão entrou no ciclo de descanso de ${CONFIG.DIAS_RECENTE} dias.${notaPredios}`
+  });
+}
+
+/**
+ * Linha (1-based) da solicitação em aberto do território na aba Respostas: o "Solicitar" mais
+ * recente pelo carimbo (mesma ordenação da consolidação). -1 se não houver.
+ */
+function localizarLinhaSolicitacaoAberta(dadosResp, num) {
+  let linha = -1;
+  let maxTs = -1;
+  for (let i = dadosResp.length - 1; i >= 1; i--) {
+    const nLinha = String(dadosResp[i][2] || "").trim().replace(/^0+/, "");
+    const acaoLinha = String(dadosResp[i][3] || "").trim();
+    if (nLinha === num && acaoLinha === "Solicitar") {
+      const tsLinha = extrairTimestamp(dadosResp[i][0]) || extrairTimestamp(dadosResp[i][4]) || i;
+      if (tsLinha >= maxTs) {
+        maxTs = tsLinha;
+        linha = i + 1;
+      }
+    }
+  }
+  return linha;
+}
+
+function normalizarNumeroTerritorio(valor) {
+  const num = String(valor === undefined || valor === null ? "" : valor).trim().replace(/^0+/, "");
+  return num && !isNaN(Number(num)) ? num : "";
+}
+
+/** Dirigente de destino de uma designação/transferência: precisa estar ATIVO na whitelist. */
+function obterDirigenteDestino(emailRaw) {
+  const email = String(emailRaw || "").toLowerCase().trim();
+  if (!email) return { erro: "Selecione o dirigente." };
+  const dirigente = buscarUsuarioAutorizado(email);
+  if (!dirigente) return { erro: `O e-mail ${email} não está cadastrado na whitelist de usuários.` };
+  if (dirigente.status !== "ATIVO") return { erro: `${dirigente.nome || email} está INATIVO na whitelist.` };
+  if (!dirigente.nome) return { erro: `Cadastre o nome de ${email} na whitelist antes de designar territórios.` };
+  return { dirigente: dirigente };
+}
+
+function formatarIsoBr(iso) {
+  const p = String(iso || "").split("-");
+  return p.length === 3 ? `${p[2]}/${p[1]}/${p[0]}` : String(iso || "");
+}
+
+/**
+ * ADMIN designa um cartão a um dirigente, fora da fila (vale também para cartão em descanso),
+ * com a data de início do trabalho informada. Grava um "Solicitar" com carimbo de agora (ordena
+ * como o último movimento) e a data de início na coluna de controle (usada como data de designação).
+ * payload: { numeroTerritorio, emailDirigente, dataInicio: "yyyy-MM-dd" }
+ */
+function designarTerritorioAdminTransacional(admin, payload) {
+  const num = normalizarNumeroTerritorio(payload && payload.numeroTerritorio);
+  if (!num) return respostaJson({ sucesso: false, codigo: 400, erro: "Número de território inválido." });
+
+  const dataInicio = String((payload && payload.dataInicio) || "").trim();
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(dataInicio);
+  const dataInicioDate = m ? new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3])) : null;
+  if (!dataInicioDate || isNaN(dataInicioDate.getTime()) ||
+      dataInicioDate.getFullYear() !== Number(m[1]) || dataInicioDate.getMonth() !== Number(m[2]) - 1 || dataInicioDate.getDate() !== Number(m[3])) {
+    return respostaJson({ sucesso: false, codigo: 400, erro: "Informe uma data de início válida." });
+  }
+  const hojeIso = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "yyyy-MM-dd");
+  if (dataInicio > hojeIso) {
+    return respostaJson({ sucesso: false, codigo: 400, erro: "A data de início não pode ser no futuro." });
+  }
+
+  const destino = obterDirigenteDestino(payload && payload.emailDirigente);
+  if (destino.erro) return respostaJson({ sucesso: false, codigo: 400, erro: destino.erro });
+  const dirigente = destino.dirigente;
+
+  // Decisão transacional: sempre sobre leitura nova da planilha, nunca do cache
+  const todos = listarTodosTerritoriosConsolidados(admin, { fresco: true });
+  const territorio = todos.find(t => String(t.numero) === num);
+  if (!territorio) {
+    return respostaJson({ sucesso: false, codigo: 404, erro: `O território ${num} não existe na base.` });
+  }
+  if (territorio.statusReal === "OCUPADO") {
+    registrarAuditoria("ADMIN_DESIGNAR_TERRITORIO", admin.nome, admin.email, num, "NEGADO", `Já está com ${territorio.dirigente}`);
+    return respostaJson({
+      sucesso: false,
+      codigo: 409,
+      erro: `O território ${num} já está com ${territorio.dirigente || "outro dirigente"}. Use "Transferir" para trocar o dirigente.`,
+      territorios: todos
+    });
+  }
+  // O início não pode ser anterior à última devolução: o ciclo novo ficaria sobreposto ao anterior
+  if (territorio.ultimaAcao === "Devolver" && territorio.ultimaData && dataInicio < territorio.ultimaData) {
+    return respostaJson({
+      sucesso: false,
+      codigo: 400,
+      erro: `A data de início não pode ser anterior à última devolução do território ${num} (${formatarIsoBr(territorio.ultimaData)}).`
+    });
+  }
+
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheetResp = ss.getSheetByName("Respostas");
+  sheetResp.appendRow(sanitizarLinha([
+    new Date(),
+    dirigente.nome,
+    Number(num),
+    "Solicitar",
+    dataInicioDate,
+    dirigente.email,
+    territorio.tipo || "Cidade",
+    "",
+    "DESIGNADO_ADMIN"
+  ], 200));
+
+  SpreadsheetApp.flush();
+  const estavaEmDescanso = territorio.statusReal === "RECENTE";
+  atualizarUltimaAtividadeUsuario(dirigente.email, `Recebeu T-${num} (designado por ${admin.nome})`);
+  registrarAuditoria("ADMIN_DESIGNAR_TERRITORIO", admin.nome, admin.email, num, "SUCESSO",
+    `Designado a ${dirigente.nome} (${dirigente.email}) com início em ${formatarIsoBr(dataInicio)}${estavaEmDescanso ? " | cartão estava em descanso" : ""}`);
+
+  return respostaJson({
+    sucesso: true,
+    mensagem: `Território ${num} (${territorio.bairro}) designado a ${dirigente.nome} com início em ${formatarIsoBr(dataInicio)}.`
+  });
+}
+
+/**
+ * ADMIN transfere um cartão em campo para outro dirigente sem mexer na data de início.
+ * A solicitação em aberto vira "Transferido" (fica no histórico de quem estava com o cartão e sai
+ * da consolidação) e uma nova "Solicitar" é gravada para o novo dirigente com a MESMA data de
+ * controle. O progresso em campo (quadras, prédios, casas) é do território e segue com ele.
+ * payload: { numeroTerritorio, emailDirigente }
+ */
+function transferirTerritorioAdminTransacional(admin, payload) {
+  const num = normalizarNumeroTerritorio(payload && payload.numeroTerritorio);
+  if (!num) return respostaJson({ sucesso: false, codigo: 400, erro: "Número de território inválido." });
+
+  const destino = obterDirigenteDestino(payload && payload.emailDirigente);
+  if (destino.erro) return respostaJson({ sucesso: false, codigo: 400, erro: destino.erro });
+  const novo = destino.dirigente;
+
+  const todos = listarTodosTerritoriosConsolidados(admin, { fresco: true });
+  const territorio = todos.find(t => String(t.numero) === num);
+  if (!territorio) {
+    return respostaJson({ sucesso: false, codigo: 404, erro: `O território ${num} não existe na base.` });
+  }
+  if (territorio.statusReal !== "OCUPADO") {
+    return respostaJson({
+      sucesso: false,
+      codigo: 409,
+      erro: `O território ${num} não está em campo. Use "Designar" para entregá-lo a um dirigente.`,
+      territorios: todos
+    });
+  }
+  const emailAtual = String(territorio.emailDirigente || "").toLowerCase();
+  const mesmoDirigente = emailAtual
+    ? emailAtual === novo.email
+    : String(territorio.dirigente || "").toLowerCase() === novo.nome.toLowerCase();
+  if (mesmoDirigente) {
+    return respostaJson({ sucesso: false, codigo: 400, erro: `O território ${num} já está com ${novo.nome}.` });
+  }
+
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheetResp = ss.getSheetByName("Respostas");
+  const dadosResp = sheetResp.getDataRange().getValues();
+  const linha = localizarLinhaSolicitacaoAberta(dadosResp, num);
+  if (linha < 0) {
+    return respostaJson({ sucesso: false, codigo: 409, erro: `Não foi encontrada a solicitação em aberto do território ${num}.` });
+  }
+  const original = dadosResp[linha - 1];
+  // Data de início preservada: a mesma célula de controle (ou o carimbo, em linhas antigas sem ela)
+  const dataInicioOriginal = original[4] || original[0];
+  const anterior = String(original[1] || territorio.dirigente || "").trim();
+
+  sheetResp.getRange(linha, 4).setValue("Transferido");
+  sheetResp.getRange(linha, 9).setValue("TRANSFERIDO");
+  sheetResp.appendRow(sanitizarLinha([
+    new Date(),
+    novo.nome,
+    Number(num),
+    "Solicitar",
+    dataInicioOriginal,
+    novo.email,
+    String(original[6] || territorio.tipo || "Cidade"),
+    "",
+    "TRANSFERIDO"
+  ], 200));
+
+  SpreadsheetApp.flush();
+  atualizarUltimaAtividadeUsuario(novo.email, `Recebeu T-${num} por transferência (de ${anterior})`);
+  registrarAuditoria("ADMIN_TRANSFERIR_TERRITORIO", admin.nome, admin.email, num, "SUCESSO",
+    `De ${anterior}${emailAtual ? ` (${emailAtual})` : ""} para ${novo.nome} (${novo.email}) | início mantido em ${formatarIsoBr(territorio.ultimaData)}`);
+
+  return respostaJson({
+    sucesso: true,
+    mensagem: `Território ${num} (${territorio.bairro}) transferido de ${anterior} para ${novo.nome}. Início do trabalho mantido em ${formatarIsoBr(territorio.ultimaData)}.`
   });
 }
 

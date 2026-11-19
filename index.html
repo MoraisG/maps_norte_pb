@@ -6,7 +6,7 @@
   <meta name="theme-color" content="#ffffff" />
   <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://accounts.google.com/gsi/client; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://accounts.google.com/gsi/style; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: https://tile.openstreetmap.org https://server.arcgisonline.com https://ibasemaps-api.arcgis.com https://static-map-tiles-api.arcgis.com https://*.googleusercontent.com; connect-src 'self' https://script.google.com https://script.googleusercontent.com https://accounts.google.com/gsi/; frame-src https://accounts.google.com/gsi/; worker-src 'self'; manifest-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; upgrade-insecure-requests;" />
   <meta name="referrer" content="strict-origin-when-cross-origin" />
-  <script src="js/frame-guard.js?v=25"></script>
+  <script src="js/frame-guard.js?v=26"></script>
   <title>Territórios Norte PB — Gestão e Mapas</title>
   <link rel="manifest" href="manifest.json" />
   <link rel="icon" type="image/svg+xml" href="assets/icon.svg" />
@@ -20,14 +20,14 @@
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
 
   <!-- Tailwind CSS (compilado localmente) & Leaflet GIS (hospedado no próprio site) -->
-  <link rel="stylesheet" href="css/tailwind.css?v=25" />
+  <link rel="stylesheet" href="css/tailwind.css?v=26" />
   <link rel="stylesheet" href="vendor/leaflet-1.9.4/leaflet.css" />
   <script src="vendor/leaflet-1.9.4/leaflet.js"></script>
   <script src="vendor/qrcode-generator-1.4.4/qrcode.js"></script>
 
   <!-- Google Identity Services (OAuth2 / OIDC Real) -->
   <script src="https://accounts.google.com/gsi/client" async defer></script>
-  <link rel="stylesheet" href="css/styles.css?v=25" />
+  <link rel="stylesheet" href="css/styles.css?v=26" />
   <!-- Hachura dos territórios ocupados (precisa estar no documento para achar o <pattern> do fim da página) -->
   <style>
     path.poligono-hachura-ocupado { fill: url(#padrao-hachura-ocupado); fill-opacity: 1; }
@@ -422,6 +422,46 @@
           </div>
         </div>
 
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          <form id="form-admin-designar" class="bg-white border border-slate-200 rounded-2xl p-4 space-y-3 h-fit">
+            <div>
+              <h4 class="text-xs font-bold uppercase tracking-wider text-[#0b57d0]">Designar território</h4>
+              <p class="text-[11px] text-slate-500 mt-0.5">Entrega um cartão a um dirigente, independente da fila, com a data em que o trabalho começou.</p>
+            </div>
+            <div>
+              <label for="designar-territorio" class="block text-[11px] font-medium text-slate-600 mb-1">Território (fora de campo)</label>
+              <select id="designar-territorio" required class="w-full px-3 py-2 text-xs bg-slate-50 border border-slate-300 rounded-xl text-slate-900"></select>
+              <p id="designar-aviso" class="text-[11px] text-[#b06000] mt-1 hidden"></p>
+            </div>
+            <div>
+              <label for="designar-dirigente" class="block text-[11px] font-medium text-slate-600 mb-1">Dirigente</label>
+              <select id="designar-dirigente" required class="w-full px-3 py-2 text-xs bg-slate-50 border border-slate-300 rounded-xl text-slate-900"></select>
+            </div>
+            <div>
+              <label for="designar-data" class="block text-[11px] font-medium text-slate-600 mb-1">Data de início do trabalho</label>
+              <input id="designar-data" type="date" required class="w-full px-3 py-2 text-xs bg-slate-50 border border-slate-300 rounded-xl text-slate-900" />
+            </div>
+            <button type="submit" class="w-full m3-btn-filled text-xs">Designar território</button>
+          </form>
+
+          <form id="form-admin-transferir" class="bg-white border border-slate-200 rounded-2xl p-4 space-y-3 h-fit">
+            <div>
+              <h4 class="text-xs font-bold uppercase tracking-wider text-[#0b57d0]">Transferir território</h4>
+              <p class="text-[11px] text-slate-500 mt-0.5">Passa um cartão em campo para outro dirigente. A data de início do trabalho e o progresso marcado são mantidos.</p>
+            </div>
+            <div>
+              <label for="transferir-territorio" class="block text-[11px] font-medium text-slate-600 mb-1">Território em campo</label>
+              <select id="transferir-territorio" required class="w-full px-3 py-2 text-xs bg-slate-50 border border-slate-300 rounded-xl text-slate-900"></select>
+              <p id="transferir-info" class="text-[11px] text-slate-500 mt-1"></p>
+            </div>
+            <div>
+              <label for="transferir-dirigente" class="block text-[11px] font-medium text-slate-600 mb-1">Novo dirigente</label>
+              <select id="transferir-dirigente" required class="w-full px-3 py-2 text-xs bg-slate-50 border border-slate-300 rounded-xl text-slate-900"></select>
+            </div>
+            <button type="submit" class="w-full m3-btn-filled text-xs">Transferir território</button>
+          </form>
+        </div>
+
         <div class="bg-white border border-slate-200 rounded-2xl p-4 space-y-2">
           <h4 class="text-xs font-bold uppercase tracking-wider text-slate-700">Importar casas rurais</h4>
           <p class="text-[11px] text-slate-500">Arquivo .json gerado no computador por <code>scripts/rurais/importar-pontos-kmz.js</code>. Substitui a aba PontosRurais e mantém as visitas já marcadas.</p>
@@ -653,15 +693,15 @@
   </svg>
 
   <!-- Scripts Modulares da Aplicação -->
-  <script src="js/geo.js?v=25"></script>
-  <script src="js/utils.js?v=25"></script>
-  <script src="js/api.js?v=25"></script>
-  <script src="js/armazenamento.js?v=25"></script>
-  <script src="js/fila.js?v=25"></script>
-  <script src="js/pacote-offline.js?v=25"></script>
-  <script src="js/modal-predios.js?v=25"></script>
-  <script src="js/map.js?v=25"></script>
-  <script src="js/instalacao.js?v=25"></script>
-  <script src="js/app.js?v=25"></script>
+  <script src="js/geo.js?v=26"></script>
+  <script src="js/utils.js?v=26"></script>
+  <script src="js/api.js?v=26"></script>
+  <script src="js/armazenamento.js?v=26"></script>
+  <script src="js/fila.js?v=26"></script>
+  <script src="js/pacote-offline.js?v=26"></script>
+  <script src="js/modal-predios.js?v=26"></script>
+  <script src="js/map.js?v=26"></script>
+  <script src="js/instalacao.js?v=26"></script>
+  <script src="js/app.js?v=26"></script>
 </body>
 </html>

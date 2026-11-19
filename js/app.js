@@ -281,6 +281,19 @@ const App = {
       Utils.sinalizarOcupado(btnSalvar, this.salvarUsuarioWhitelist());
     });
 
+    // Designar (fora da fila) e transferir território entre dirigentes
+    for (const [idForm, acao] of [["form-admin-designar", () => this.designarTerritorioAdmin()], ["form-admin-transferir", () => this.transferirTerritorioAdmin()]]) {
+      const form = document.getElementById(idForm);
+      form?.addEventListener("submit", e => {
+        e.preventDefault();
+        const btn = e.submitter || form.querySelector('button[type="submit"]');
+        if (Utils.estaOcupado(btn)) return;
+        Utils.sinalizarOcupado(btn, acao());
+      });
+    }
+    document.getElementById("designar-territorio")?.addEventListener("change", () => this.atualizarDicasDesignacao());
+    document.getElementById("transferir-territorio")?.addEventListener("change", () => this.atualizarDicasDesignacao());
+
     ligarAcaoAssincrona(document.getElementById("btn-admin-lembretes"), () => this.dispararLembretesAdmin());
     ligarAcaoAssincrona(document.getElementById("btn-refresh-audit"), () => this.carregarDadosAdmin());
   },
@@ -1518,11 +1531,11 @@ const App = {
             <span class="px-2.5 py-0.5 rounded-full text-[10px] font-bold ${
               h.acao === "Solicitar"
                 ? "bg-[#fef7e0] text-[#b06000]"
-                : h.acao === "Cancelado_NaoIniciado"
+                : h.acao === "Cancelado_NaoIniciado" || h.acao === "Transferido"
                 ? "bg-slate-100 text-slate-600"
                 : "bg-[#e6f4ea] text-[#146c2e]"
             }">
-              ${Utils.escapeHtml(h.acao === "Cancelado_NaoIniciado" ? "Devolvido (Não Iniciado)" : h.acao)}
+              ${Utils.escapeHtml(h.acao === "Cancelado_NaoIniciado" ? "Devolvido (Não Iniciado)" : h.acao === "Transferido" ? "Transferido a outro dirigente" : h.acao)}
             </span>
           </td>
           <td class="py-2.5 px-4 text-slate-500">${Utils.escapeHtml(h.tipo)}</td>
@@ -1543,6 +1556,7 @@ const App = {
 
       this.usuariosAdmin = resUsers.usuarios || [];
       document.getElementById("count-usuarios").textContent = this.usuariosAdmin.length;
+      this.preencherFormsDesignacao();
 
       const tbodyUsers = document.getElementById("tbody-admin-usuarios");
       tbodyUsers.innerHTML = this.usuariosAdmin.map((u, idx) => `
@@ -1703,6 +1717,176 @@ const App = {
     }
   },
 
+  /**
+   * Preenche as listas dos formulários "Designar" (cartões fora de campo) e "Transferir"
+   * (cartões em campo) e a lista de dirigentes ATIVOS. Mantém a seleção atual quando possível.
+   */
+  preencherFormsDesignacao(opcoes) {
+    const selTerrDesignar = document.getElementById("designar-territorio");
+    const selTerrTransferir = document.getElementById("transferir-territorio");
+    if (!selTerrDesignar || !selTerrTransferir) return;
+
+    const porNumero = (a, b) => Number(a.numero) - Number(b.numero);
+    const rotuloStatus = t => t.statusReal === "RECENTE"
+      ? `em descanso desde ${Utils.formatarDataBr(t.ultimaData)}`
+      : (t.ultimaAcao === "Devolver" ? `disponível, devolvido em ${Utils.formatarDataBr(t.ultimaData)}` : "disponível, nunca trabalhado");
+    const opcao = (valor, texto) => `<option value="${Utils.escapeHtml(String(valor))}">${Utils.escapeHtml(texto)}</option>`;
+    const manter = (sel, html, preferido) => {
+      const anterior = preferido !== undefined ? String(preferido) : sel.value;
+      sel.innerHTML = html;
+      if (anterior && [...sel.options].some(o => o.value === anterior)) sel.value = anterior;
+    };
+
+    const foraDeCampo = this.territorios.filter(t => t.statusReal !== "OCUPADO").sort(porNumero);
+    const emCampo = this.territorios.filter(t => t.statusReal === "OCUPADO").sort(porNumero);
+    manter(selTerrDesignar, opcao("", foraDeCampo.length ? "Selecione o território..." : "Nenhum território fora de campo") +
+      foraDeCampo.map(t => opcao(t.numero, `T-${t.numero} — ${t.bairro} (${rotuloStatus(t)})`)).join(""));
+    manter(selTerrTransferir, opcao("", emCampo.length ? "Selecione o território..." : "Nenhum território em campo") +
+      emCampo.map(t => opcao(t.numero, `T-${t.numero} — ${t.bairro} (com ${t.dirigente || "dirigente"})`)).join(""),
+      opcoes && opcoes.transferir);
+
+    const ativos = (this.usuariosAdmin || [])
+      .filter(u => u.status === "ATIVO" && u.nome)
+      .sort((a, b) => a.nome.localeCompare(b.nome, "pt-BR"));
+    const htmlDirigentes = opcao("", "Selecione o dirigente...") + ativos.map(u => opcao(u.email, `${u.nome} (${u.email})`)).join("");
+    for (const id of ["designar-dirigente", "transferir-dirigente"]) {
+      const sel = document.getElementById(id);
+      if (sel) manter(sel, htmlDirigentes);
+    }
+
+    const inputData = document.getElementById("designar-data");
+    if (inputData) {
+      inputData.max = this.dataDeHojeIso();
+      if (!inputData.value) inputData.value = this.dataDeHojeIso();
+    }
+    this.atualizarDicasDesignacao();
+  },
+
+  /** Avisos sob os seletores: cartão em descanso (designar) e início mantido (transferir). */
+  atualizarDicasDesignacao() {
+    const achar = id => {
+      const valor = document.getElementById(id)?.value;
+      return valor ? this.territorios.find(t => String(t.numero) === valor) : null;
+    };
+
+    const tDesignar = achar("designar-territorio");
+    const aviso = document.getElementById("designar-aviso");
+    const inputData = document.getElementById("designar-data");
+    if (inputData) inputData.min = tDesignar && tDesignar.ultimaAcao === "Devolver" ? tDesignar.ultimaData : "";
+    if (aviso) {
+      const emDescanso = tDesignar && tDesignar.statusReal === "RECENTE";
+      aviso.textContent = emDescanso
+        ? `⚠️ Este cartão está em descanso (devolvido em ${Utils.formatarDataBr(tDesignar.ultimaData)}). A designação ignora o período de descanso.`
+        : "";
+      aviso.classList.toggle("hidden", !emDescanso);
+    }
+
+    const tTransferir = achar("transferir-territorio");
+    const info = document.getElementById("transferir-info");
+    if (info) {
+      info.textContent = tTransferir
+        ? `Com ${tTransferir.dirigente || "dirigente"} desde ${Utils.formatarDataBr(tTransferir.ultimaData)}. Essa data de início será mantida.`
+        : "";
+    }
+  },
+
+  /** Atalho do painel de ocupados: abre o painel ADMIN com o cartão já escolhido em "Transferir". */
+  abrirTransferenciaAdmin(numero) {
+    if (!this.usuarioAtual || this.usuarioAtual.perfil !== "ADMIN") return;
+    this.alternarAba("tab-admin");
+    this.preencherFormsDesignacao({ transferir: numero });
+    const form = document.getElementById("form-admin-transferir");
+    form?.scrollIntoView({ behavior: "smooth", block: "center" });
+    document.getElementById("transferir-dirigente")?.focus({ preventScroll: true });
+  },
+
+  async designarTerritorioAdmin() {
+    if (this.avisarSePrecisaDeConexao("Designar território")) return;
+    const numero = document.getElementById("designar-territorio").value;
+    const email = document.getElementById("designar-dirigente").value;
+    const dataInicio = document.getElementById("designar-data").value;
+    const t = this.territorios.find(item => String(item.numero) === numero);
+    const dirigente = (this.usuariosAdmin || []).find(u => u.email === email);
+    if (!t || !dirigente || !dataInicio) {
+      Utils.mostrarToast("Selecione o território, o dirigente e a data de início.", "aviso");
+      return;
+    }
+    if (dataInicio > this.dataDeHojeIso()) {
+      Utils.mostrarToast("A data de início não pode ser no futuro.", "aviso");
+      return;
+    }
+
+    const ok = await ModalM3.confirmar({
+      icone: "📌",
+      titulo: `Designar o Território ${Number(t.numero)}?`,
+      subtituloHtml: `
+        <p><strong>${Utils.escapeHtml(t.bairro)}</strong> ficará com <strong>${Utils.escapeHtml(dirigente.nome)}</strong>,
+        com início do trabalho em <strong>${Utils.formatarDataBr(dataInicio)}</strong>.</p>
+        <p>A designação não depende da fila.${t.statusReal === "RECENTE" ? " O cartão está em descanso e sairá dele agora." : ""}</p>`,
+      textoConfirmar: "Designar",
+      textoCancelar: "Cancelar"
+    });
+    if (!ok) return;
+
+    try {
+      const res = await ApiClient.request("admin/territorios/designar", {
+        numeroTerritorio: Number(t.numero),
+        emailDirigente: dirigente.email,
+        dataInicio
+      });
+      Utils.mostrarToast(res.mensagem, "sucesso");
+      document.getElementById("designar-territorio").value = "";
+      document.getElementById("designar-dirigente").value = "";
+      document.getElementById("designar-data").value = "";
+      await this.sincronizarDados({ silencioso: true });
+      await this.carregarDadosAdmin();
+    } catch (err) {
+      Utils.mostrarToast(err.message, "erro");
+    }
+  },
+
+  async transferirTerritorioAdmin() {
+    if (this.avisarSePrecisaDeConexao("Transferir território")) return;
+    const numero = document.getElementById("transferir-territorio").value;
+    const email = document.getElementById("transferir-dirigente").value;
+    const t = this.territorios.find(item => String(item.numero) === numero);
+    const dirigente = (this.usuariosAdmin || []).find(u => u.email === email);
+    if (!t || !dirigente) {
+      Utils.mostrarToast("Selecione o território e o novo dirigente.", "aviso");
+      return;
+    }
+    if ((t.emailDirigente && t.emailDirigente === dirigente.email) || (!t.emailDirigente && String(t.dirigente || "").toLowerCase() === dirigente.nome.toLowerCase())) {
+      Utils.mostrarToast(`O Território ${Number(t.numero)} já está com ${dirigente.nome}.`, "aviso");
+      return;
+    }
+
+    const ok = await ModalM3.confirmar({
+      icone: "🔁",
+      titulo: `Transferir o Território ${Number(t.numero)}?`,
+      subtituloHtml: `
+        <p><strong>${Utils.escapeHtml(t.bairro)}</strong> passa de <strong>${Utils.escapeHtml(t.dirigente || "dirigente atual")}</strong>
+        para <strong>${Utils.escapeHtml(dirigente.nome)}</strong>.</p>
+        <p>O início do trabalho continua em <strong>${Utils.formatarDataBr(t.ultimaData)}</strong> e o progresso marcado (quadras, prédios e casas) segue com o cartão.</p>`,
+      textoConfirmar: "Transferir",
+      textoCancelar: "Cancelar"
+    });
+    if (!ok) return;
+
+    try {
+      const res = await ApiClient.request("admin/territorios/transferir", {
+        numeroTerritorio: Number(t.numero),
+        emailDirigente: dirigente.email
+      });
+      Utils.mostrarToast(res.mensagem, "sucesso");
+      document.getElementById("transferir-territorio").value = "";
+      document.getElementById("transferir-dirigente").value = "";
+      await this.sincronizarDados({ silencioso: true });
+      await this.carregarDadosAdmin();
+    } catch (err) {
+      Utils.mostrarToast(err.message, "erro");
+    }
+  },
+
   async dispararLembretesAdmin() {
     const ok = await ModalM3.confirmar({
       icone: "📧",
@@ -1834,6 +2018,9 @@ const App = {
       const btnDevolver = podeDevolver
         ? `<button data-acao="devolver" data-num="${Number(t.numero)}" class="px-3 py-1 rounded-full bg-[#0b57d0] hover:bg-[#0842a0] text-white text-[11px] font-semibold transition">Devolver</button>`
         : "";
+      const btnTransferir = this.usuarioAtual && this.usuarioAtual.perfil === "ADMIN"
+        ? `<button data-acao="admin-transferir" data-num="${Number(t.numero)}" class="px-3 py-1 rounded-full bg-slate-100 hover:bg-slate-200 text-slate-700 text-[11px] font-semibold transition">🔁 Transferir</button>`
+        : "";
 
       return `
         <tr class="hover:bg-slate-50">
@@ -1853,6 +2040,7 @@ const App = {
           </td>
           <td class="py-2.5 px-4 text-right whitespace-nowrap space-x-1">
             ${btnMapa}
+            ${btnTransferir}
             ${btnDevolver}
           </td>
         </tr>
@@ -2173,6 +2361,7 @@ const ACOES_UI = {
   "alternar-selecao": el => App.alternarSelecaoTerritorio(Number(el.dataset.num)),
   "filtrar-fila-predios": () => App.filtrarFilaComPredios(),
   "editar-usuario": el => App.preencherFormUsuario(Number(el.dataset.idx)),
+  "admin-transferir": el => App.abrirTransferenciaAdmin(Number(el.dataset.num)),
   "filtrar-dirigente": el => App.filtrarDashboardPorDirigente(el.dataset.dirigente || ""),
   "alternar-predio": el => App.acaoAlternarPredioTrabalhado(el.dataset.idPredio, Number(el.dataset.num), el.dataset.trabalhado === "true"),
   "focar-predio": el => MapaTerritorios.focarPredioNoModal(el.dataset.idPredio),
