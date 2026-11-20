@@ -23,8 +23,8 @@ const texto = [
 ].join("\n");
 
 const meds = extrairMedicoes(texto);
-assert.strictEqual(meds.length, 5, "ignora a medição antiga (territorios/listar) e acha as 5 de requisição");
-assert.deepStrictEqual(meds.map(m => m._horario && m._horario.local.h), [8, 8, 9, 15, 18], "horário da linha ou de linhas acima");
+assert.strictEqual(meds.length, 6, "acha as 5 de requisição e a de territorios/listar");
+assert.deepStrictEqual(meds.map(m => m._horario && m._horario.local.h), [8, 8, 8, 9, 15, 18], "horário da linha ou de linhas acima");
 
 const r = analisar(meds);
 assert.strictEqual(r.total, 5);
@@ -78,5 +78,22 @@ assert.strictEqual(percentil([1, 2, 3, 4, 5, 6, 7, 8, 9, 10], 50), 5);
 const txt = formatarRelatorio(r);
 assert.ok(txt.includes("lock429: 1") && txt.includes("POR ROTA") && txt.includes("MAIS LENTAS"));
 assert.ok(formatarRelatorio(analisar([])).includes("Nenhuma linha"));
+
+// 6) Listagem (medição da spec 06): taxa de "não modificado", sem entrar no total de requisições
+const lst = [
+  "08:00:00 " + JSON.stringify({ medicao: "territorios/listar", tipo: "nao-modificado-cache", ms: 40 }),
+  "08:01:00 " + JSON.stringify({ medicao: "territorios/listar", tipo: "nao-modificado", ms: 300 }),
+  "08:02:00 " + JSON.stringify({ medicao: "territorios/listar", tipo: "completa", ms: 2000 }),
+  "08:03:00 " + JSON.stringify({ medicao: "territorios/listar", tipo: "nao-modificado-cache", ms: 50 }),
+  "19:00:00 " + JSON.stringify({ medicao: "territorios/listar", tipo: "completa", ms: 2100 })
+].join("\n");
+const rl = analisar(extrairMedicoes(lst), { janelas: parseJanela("08-11") });
+assert.strictEqual(rl.total, 0);
+assert.strictEqual(rl.listagem.total, 4);
+assert.strictEqual(rl.listagem.naoModificado, 3);
+assert.strictEqual(rl.listagem.taxaNaoModificado, 75);
+assert.strictEqual(rl.listagem.tipos["nao-modificado-cache"].n, 2);
+assert.ok(formatarRelatorio(rl).includes("não modificado 3 (75%)"));
+assert.strictEqual(r.listagem.total, 1, "a linha antiga do texto do caso 1 entra na listagem");
 
 console.log("analisar-medicao: ok");

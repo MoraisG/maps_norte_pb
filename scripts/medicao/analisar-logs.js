@@ -4,6 +4,7 @@
  *
  * Lê qualquer exportação/cópia do log do Apps Script e procura as linhas
  *   {"medicao":"requisicao","rota":...,"ms":...,"etapas":{...},"fontes":{...},"lock429":true,...}
+ * e também as linhas antigas {"medicao":"territorios/listar","tipo":...} (taxa de "não modificado").
  * Formatos aceitos (detectados sozinhos):
  *   - texto colado da página "Execuções" do Apps Script (uma ou várias linhas por entrada);
  *   - exportação JSON do Cloud Logging (array de entradas com textPayload/jsonPayload);
@@ -77,8 +78,8 @@ function horaLocal(horario) {
   return { h: t.getUTCHours(), m: t.getUTCMinutes(), s: t.getUTCSeconds() };
 }
 
-function ehMedicaoRequisicao(o) {
-  return o && typeof o === "object" && o.medicao === "requisicao" && typeof o.ms === "number";
+function ehMedicao(o) {
+  return o && typeof o === "object" && (o.medicao === "requisicao" || o.medicao === "territorios/listar") && typeof o.ms === "number";
 }
 
 /** Percorre JSON exportado (Cloud Logging ou outro) atrás de medições, herdando o timestamp da entrada. */
@@ -87,13 +88,13 @@ function varrerJson(no, horarioHerdado, saida) {
   if (typeof no === "string") {
     if (no.indexOf('"medicao"') >= 0) {
       for (const a of extrairObjetosDeTexto(no)) {
-        if (ehMedicaoRequisicao(a.obj)) saida.push({ ...a.obj, _horario: horarioHerdado });
+        if (ehMedicao(a.obj)) saida.push({ ...a.obj, _horario: horarioHerdado });
       }
     }
     return;
   }
   if (!no || typeof no !== "object") return;
-  if (ehMedicaoRequisicao(no)) { saida.push({ ...no, _horario: horarioHerdado }); return; }
+  if (ehMedicao(no)) { saida.push({ ...no, _horario: horarioHerdado }); return; }
   const ts = no.timestamp || no.receiveTimestamp || no.time;
   const horario = (typeof ts === "string" && lerHorario(ts)) || horarioHerdado;
   for (const k of Object.keys(no)) varrerJson(no[k], horario, saida);
@@ -109,7 +110,7 @@ function varrerTexto(texto, saida) {
     const linhas = trecho.split(/\r?\n/);
     for (const l of linhas) { const h = lerHorario(l); if (h) ultimoHorario = h; }
     cursor = a.fim;
-    if (ehMedicaoRequisicao(a.obj)) saida.push({ ...a.obj, _horario: ultimoHorario });
+    if (ehMedicao(a.obj)) saida.push({ ...a.obj, _horario: ultimoHorario });
   }
 }
 
@@ -164,12 +165,30 @@ function dentroDaJanela(med, janelas) {
   return janelas.some(j => min >= j.ini && min < j.fim);
 }
 
+/**
+ * Linhas antigas {"medicao":"territorios/listar","tipo":...} (spec 06): taxa de "não modificado".
+ * tipos: nao-modificado-cache (respondeu do cache, sem ler a planilha), nao-modificado, completa.
+ */
+function resumoListagem(lista) {
+  const porTipo = {};
+  for (const m of lista) {
+    const t = m.tipo || "(sem tipo)";
+    (porTipo[t] = porTipo[t] || []).push(m.ms);
+  }
+  const tipos = {};
+  for (const t of Object.keys(porTipo)) tipos[t] = resumoNumeros(porTipo[t]);
+  const naoMod = lista.filter(m => String(m.tipo || "").startsWith("nao-modificado")).length;
+  return { total: lista.length, naoModificado: naoMod, taxaNaoModificado: lista.length ? +(naoMod / lista.length * 100).toFixed(1) : null, tipos };
+}
+
 function analisar(medicoes, opcoes) {
   const janelas = opcoes && opcoes.janelas;
-  const sel = medicoes.filter(m => dentroDaJanela(m, janelas));
+  const req = medicoes.filter(m => m.medicao === "requisicao");
+  const sel = req.filter(m => dentroDaJanela(m, janelas));
   const r = {
     total: sel.length,
-    ignoradasPelaJanela: medicoes.length - sel.length,
+    ignoradasPelaJanela: req.length - sel.length,
+    listagem: resumoListagem(medicoes.filter(m => m.medicao === "territorios/listar" && dentroDaJanela(m, janelas))),
     semHorario: sel.filter(m => !m._horario).length,
     geral: resumoNumeros(sel.map(m => m.ms)),
     lock429: sel.filter(m => m.lock429).length,
@@ -249,7 +268,13 @@ function formatarRelatorio(r) {
   const out = [];
   out.push("MEDIÇÃO POR REQUISIÇÃO — spec 08, fase 0");
   out.push(`Requisições: ${r.total}` + (r.ignoradasPelaJanela ? ` (fora da janela: ${r.ignoradasPelaJanela})` : "") + (r.semHorario ? ` · sem horário: ${r.semHorario}` : ""));
-  if (!r.total) { out.push("\nNenhuma linha {\"medicao\":\"requisicao\"} encontrada."); return out.join("\n"); }
+  const lg = r.listagem;
+  const blocoListagem = () => {
+    if (!lg || !lg.total) return;
+    out.push(`\nLISTAGEM (territorios/listar, medição da spec 06): ${lg.total} chamadas · não modificado ${lg.naoModificado} (${lg.taxaNaoModificado}%)`);
+    out.push(tabela(["tipo", "n", "p50", "p95", "máx"], Object.keys(lg.tipos).sort().map(t => { const s = lg.tipos[t]; return [t, s.n, s.p50, s.p95, s.max]; })));
+  };
+  if (!r.total) { out.push("\nNenhuma linha {\"medicao\":\"requisicao\"} encontrada."); blocoListagem(); return out.join("\n"); }
   const g = r.geral;
   out.push(`Tempo total (ms): média ${g.media} · p50 ${g.p50} · p90 ${g.p90} · p95 ${g.p95} · máx ${g.max}`);
   out.push(`lock429: ${r.lock429} (${pct(r.lock429, r.total)}) · erro500: ${r.erro500} (${pct(r.erro500, r.total)})`);
@@ -280,6 +305,8 @@ function formatarRelatorio(r) {
       horas.map(k => { const b = r.porHora[k]; return [k, b.n, b.p50, b.p95, b.max, b.lock429, b.erro500]; })));
   }
 
+  blocoListagem();
+
   out.push(`\nMAIS LENTAS (top ${r.maisLentas.length})`);
   out.push(tabela(["horário", "rota", "ms", "etapas", "flags"], r.maisLentas.map(m => [
     m.horario, m.rota, m.ms,
@@ -307,7 +334,7 @@ function main(argv) {
   for (const f of arquivos) medicoes.push(...extrairMedicoes(fs.readFileSync(f, "utf8")));
   const r = analisar(medicoes, opcoes);
   console.log(json ? JSON.stringify(r, null, 2) : formatarRelatorio(r));
-  return r.total ? 0 : 1;
+  return (r.total || r.listagem.total) ? 0 : 1;
 }
 
 module.exports = { extrairMedicoes, analisar, formatarRelatorio, parseJanela, percentil };
