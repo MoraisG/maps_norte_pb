@@ -33,7 +33,7 @@ const MapaTerritorios = {
   CHAVE_ESRI: "",
   FALHAS_SATELITE_PARA_DESISTIR: 4,
   ZOOM_MIN_DETALHES: 15,          // quadras numeradas e pinos de prédios só a partir deste zoom
-  VERSAO_QUADRAS_GEO: 26,         // manter igual à VERSAO de sw.js (vale também para vias-rurais.geojson)
+  VERSAO_QUADRAS_GEO: 27,         // manter igual à VERSAO de sw.js (vale também para vias-rurais.geojson)
   ZOOM_MIN_NOMES_VIAS: 14,        // nomes das estradas rurais só a partir deste zoom
   ATRIBUICAO_OSM: '&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener noreferrer">OpenStreetMap</a> contributors',
   _localizacao: new Map(),        // mapa -> estado do "minha posição" (GPS)
@@ -642,7 +642,7 @@ const MapaTerritorios = {
     const total = Number(t.totalPontosRurais) || pontos.length;
     if (!total) return;
 
-    const podeMarcar = t.statusReal === "OCUPADO" && (t.emMinhaPosse || (App.usuarioAtual && App.usuarioAtual.perfil === "ADMIN"));
+    const podeMarcar = t.statusReal === "OCUPADO" && (t.emMinhaPosse || App.pode("progresso.alheio"));
     for (const p of pontos) {
       const visitado = Boolean(p.visitadoEm);
       const marcador = L.circleMarker([p.lat, p.lng], {
@@ -1053,7 +1053,7 @@ const MapaTerritorios = {
 
       if (App.podeSolicitarTerritorio(t)) {
         botaoAcaoHtml += `<button data-acao="solicitar" data-num="${Number(t.numero)}" class="mt-1.5 w-full py-1.5 px-3 bg-[#0b57d0] hover:bg-[#0842a0] text-white font-semibold text-xs rounded-full transition">Solicitar Território ${Number(t.numero)}</button>`;
-      } else if (t.statusReal === "OCUPADO" && (t.emMinhaPosse || (App.usuarioAtual && App.usuarioAtual.perfil === "ADMIN"))) {
+      } else if (t.statusReal === "OCUPADO" && (t.emMinhaPosse || App.pode("territorios.devolverAlheio"))) {
         botaoAcaoHtml += `<button data-acao="devolver" data-num="${Number(t.numero)}" class="mt-1.5 w-full py-1.5 px-3 bg-[#0b57d0] hover:bg-[#0842a0] text-white font-semibold text-xs rounded-full transition">Devolver Território ${Number(t.numero)}</button>`;
       }
 
@@ -1195,7 +1195,7 @@ const MapaTerritorios = {
         <button data-acao="modal-solicitar" data-num="${Number(t.numero)}" class="m3-btn-filled text-xs">
           Solicitar Território ${Number(t.numero)}
         </button>`;
-    } else if (t.statusReal === "OCUPADO" && (t.emMinhaPosse || (App.usuarioAtual && App.usuarioAtual.perfil === "ADMIN"))) {
+    } else if (t.statusReal === "OCUPADO" && (t.emMinhaPosse || App.pode("territorios.devolverAlheio"))) {
       acoesEl.innerHTML = `
         <button data-acao="modal-devolver" data-num="${Number(t.numero)}" class="m3-btn-filled text-xs">
           Devolver Território ${Number(t.numero)}
@@ -1359,7 +1359,7 @@ const MapaTerritorios = {
       resumoEl.textContent = `${predios.length} prédio(s) no cartão • ${concluidos} marcado(s) como trabalhado(s)`;
     }
 
-    const podeMarcarPredio = t.statusReal === "OCUPADO" && (t.emMinhaPosse || (App.usuarioAtual && App.usuarioAtual.perfil === "ADMIN"));
+    const podeMarcarPredio = t.statusReal === "OCUPADO" && (t.emMinhaPosse || App.pode("progresso.alheio"));
 
     listaEl.innerHTML = pontosNumerados.map(item => {
       const p = item.predio;
@@ -1470,7 +1470,7 @@ const MapaTerritorios = {
    * ==========================================================================
    */
   podeEditarQuadras(t) {
-    return Boolean(t && t.statusReal === "OCUPADO" && (t.emMinhaPosse || (App.usuarioAtual && App.usuarioAtual.perfil === "ADMIN")));
+    return Boolean(t && t.statusReal === "OCUPADO" && (t.emMinhaPosse || App.pode("progresso.alheio")));
   },
 
   renderizarQuadrasModal() {
@@ -1584,7 +1584,7 @@ const MapaTerritorios = {
     const id = Utils.escapeHtml(p.idPredio);
     const num = Number(t.numero);
     const concluido = Boolean(p.trabalhadoNesteCiclo || p.ultimaDataConclusao);
-    const podeMarcar = t.statusReal === "OCUPADO" && (t.emMinhaPosse || (App.usuarioAtual && App.usuarioAtual.perfil === "ADMIN"));
+    const podeMarcar = t.statusReal === "OCUPADO" && (t.emMinhaPosse || App.pode("progresso.alheio"));
     return `
       <div class="balao-predio-acoes">
         <button type="button" data-acao="predio-na-lista" data-id-predio="${id}" class="balao-btn">🏢 Abrir na lista de prédios</button>

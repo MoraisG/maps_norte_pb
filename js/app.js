@@ -370,13 +370,21 @@ const App = {
     const selectStatus = document.getElementById("filter-status");
     const inputSearch = document.getElementById("filter-search");
 
-    if (this.usuarioAtual.perfil === "ADMIN") {
-      btnAdmin.classList.remove("hidden");
+    // Spec 02: a interface segue as permissões enviadas pelo servidor (que sempre revalida)
+    const btnEmCampo = document.querySelector('[data-tab="tab-dashboard"]');
+    if (btnEmCampo) btnEmCampo.classList.toggle("hidden", !this.pode("gestao.visualizar"));
+    btnAdmin.classList.toggle("hidden", !this.pode("auditoria.territorios"));
+    btnAdmin.textContent = this.pode("usuarios.gerenciar") ? "Admin" : "Gestão";
+    document.querySelectorAll("[data-so-admin]").forEach(el => el.classList.toggle("hidden", !this.pode("usuarios.gerenciar")));
+    document.querySelectorAll("[data-so-supervisor]").forEach(el => el.classList.toggle("hidden", this.pode("usuarios.gerenciar")));
+
+    if (this.pode("gestao.visualizar")) {
       if (selectStatus) selectStatus.classList.remove("hidden");
       if (inputSearch) inputSearch.classList.remove("hidden");
-      badgeRole.className = "px-2.5 py-0.5 text-[10px] font-bold uppercase tracking-wider rounded-full bg-[#fef7e0] text-[#b06000] border border-[#f5d087]";
+      badgeRole.className = this.usuarioAtual.perfil === "ADMIN"
+        ? "px-2.5 py-0.5 text-[10px] font-bold uppercase tracking-wider rounded-full bg-[#fef7e0] text-[#b06000] border border-[#f5d087]"
+        : "px-2.5 py-0.5 text-[10px] font-bold uppercase tracking-wider rounded-full bg-[#e6f4ea] text-[#146c2e] border border-[#a8dab5]";
     } else {
-      btnAdmin.classList.add("hidden");
       if (selectStatus) {
         selectStatus.value = "FILA_5";
         selectStatus.classList.add("hidden");
@@ -537,7 +545,7 @@ const App = {
       this.renderizarDashboardOcupacao();
     } else if (tabId === "tab-historico") {
       this.carregarMeuHistorico();
-    } else if (tabId === "tab-admin" && this.usuarioAtual && this.usuarioAtual.perfil === "ADMIN") {
+    } else if (tabId === "tab-admin" && this.pode("auditoria.territorios")) {
       this.carregarDadosAdmin();
     }
   },
@@ -692,6 +700,17 @@ const App = {
       this.limparSelecaoLote();
       this.renderizarCardsTerritorios();
     }
+  },
+
+  /**
+   * Spec 02: o servidor envia em usuario.permissoes o que o perfil pode fazer (só para a interface;
+   * toda rota revalida). Sessão salva antes desta versão não tem a lista: ADMIN mantém tudo.
+   */
+  pode(acao) {
+    const u = this.usuarioAtual;
+    if (!u) return false;
+    if (Array.isArray(u.permissoes)) return u.permissoes.indexOf(acao) >= 0;
+    return u.perfil === "ADMIN";
   },
 
   /**
@@ -926,7 +945,7 @@ const App = {
           <span>${selecionado ? "✓ Selecionado" : "☐ Selecionar"}</span>
         </button>
       `;
-    } else if (t.statusReal === "OCUPADO" && (t.emMinhaPosse || (this.usuarioAtual && this.usuarioAtual.perfil === "ADMIN"))) {
+    } else if (t.statusReal === "OCUPADO" && (t.emMinhaPosse || this.pode("territorios.devolverAlheio"))) {
       areaAcoes = `
         <button type="button" data-acao="devolver" data-num="${num}" class="flex-1 m3-btn-filled text-xs">
           Devolver Território
@@ -1547,6 +1566,7 @@ const App = {
   },
 
   async carregarDadosAdmin() {
+    if (!this.pode("usuarios.gerenciar")) return this.carregarAuditoria();
     try {
       const [resUsers, resAudit] = await Promise.all([
         ApiClient.request("admin/usuarios/listar"),
@@ -1564,7 +1584,7 @@ const App = {
           <td class="py-2 px-3 font-semibold text-slate-900">${Utils.escapeHtml(u.nome)}</td>
           <td class="py-2 px-3 text-slate-600">${Utils.escapeHtml(u.email)}</td>
           <td class="py-2 px-3">
-            <span class="px-2 py-0.5 rounded-full text-[10px] font-bold ${u.perfil === "ADMIN" ? "bg-[#fef7e0] text-[#b06000]" : "bg-slate-100 text-slate-700"}">
+            <span class="px-2 py-0.5 rounded-full text-[10px] font-bold ${u.perfil === "ADMIN" ? "bg-[#fef7e0] text-[#b06000]" : u.perfil === "SUPERVISOR" ? "bg-[#e6f4ea] text-[#146c2e]" : "bg-slate-100 text-slate-700"}">
               ${Utils.escapeHtml(u.perfil)}
             </span>
           </td>
@@ -1580,7 +1600,23 @@ const App = {
         </tr>
       `).join("");
 
-      const logs = resAudit.logs || [];
+      this.renderizarAuditoria(resAudit.logs || []);
+    } catch (err) {
+      Utils.mostrarToast(err.message, "erro");
+    }
+  },
+
+  async carregarAuditoria() {
+    try {
+      const res = await ApiClient.request("admin/auditoria");
+      this.renderizarAuditoria(res.logs || []);
+    } catch (err) {
+      Utils.mostrarToast(err.message, "erro");
+    }
+  },
+
+  renderizarAuditoria(logs) {
+    try {
       const tbodyAudit = document.getElementById("tbody-admin-auditoria");
       tbodyAudit.innerHTML = logs.map(l => `
         <tr class="hover:bg-slate-50">
@@ -1684,7 +1720,7 @@ const App = {
 
   /** Conta as sugestões pendentes a partir da listagem (para o selo do ADMIN). */
   atualizarContagemRevisoes() {
-    if (!this.usuarioAtual || this.usuarioAtual.perfil !== "ADMIN") return;
+    if (!this.pode("predios.revisar")) return;
     let qtd = 0;
     for (const t of this.territorios || []) for (const p of t.predios || []) if (p.revisaoPendente) qtd++;
     this.definirContagemRevisoes(qtd);
@@ -1708,10 +1744,28 @@ const App = {
     };
 
     try {
-      const res = await ApiClient.request("admin/usuarios/salvar", { dadosUsuario });
+      let res;
+      try {
+        res = await ApiClient.request("admin/usuarios/salvar", { dadosUsuario });
+      } catch (err) {
+        if (!(err.codigo === 409 && err.dados && err.dados.confirmacaoNecessaria)) throw err;
+        const lista = (err.dados.territorios || []).map(t => `<li>Território ${Number(t.numero)} — ${Utils.escapeHtml(t.bairro || "")}</li>`).join("");
+        const ok = await ModalM3.confirmar({
+          icone: "⚠️",
+          titulo: `Inativar ${dadosUsuario.nome}?`,
+          subtituloHtml: `<p>Esta pessoa está com cartões em campo. Ao confirmar, eles serão devolvidos (como trabalho incompleto) e o registro fica na Auditoria.</p><ul class="list-disc pl-5 mt-2">${lista}</ul>`,
+          textoConfirmar: "Inativar e devolver",
+          textoCancelar: "Cancelar",
+          variante: "perigo"
+        });
+        if (!ok) return;
+        res = await ApiClient.request("admin/usuarios/salvar", { dadosUsuario: Object.assign({ forcar: true }, dadosUsuario) });
+      }
       Utils.mostrarToast(res.mensagem, "sucesso");
       document.getElementById("form-admin-usuario").reset();
+      if (res.devolvidos && res.devolvidos.length) this._versaoListagem = "";
       await this.carregarDadosAdmin();
+      if (res.devolvidos && res.devolvidos.length) await this.sincronizarDados({ silencioso: true });
     } catch (err) {
       Utils.mostrarToast(err.message, "erro");
     }
@@ -1792,7 +1846,7 @@ const App = {
 
   /** Atalho do painel de ocupados: abre o painel ADMIN com o cartão já escolhido em "Transferir". */
   abrirTransferenciaAdmin(numero) {
-    if (!this.usuarioAtual || this.usuarioAtual.perfil !== "ADMIN") return;
+    if (!this.pode("territorios.designar")) return;
     this.alternarAba("tab-admin");
     this.preencherFormsDesignacao({ transferir: numero });
     const form = document.getElementById("form-admin-transferir");
@@ -2014,11 +2068,11 @@ const App = {
         ? `<button data-acao="abrir-mapa" data-num="${Number(t.numero)}" class="px-3 py-1 rounded-full bg-slate-100 hover:bg-slate-200 text-slate-700 text-[11px] font-semibold transition">🗺️ Mapa${qtdPredios ? ` (${qtdPredios})` : ""}</button>`
         : "";
 
-      const podeDevolver = t.emMinhaPosse || (this.usuarioAtual && this.usuarioAtual.perfil === "ADMIN");
+      const podeDevolver = t.emMinhaPosse || this.pode("territorios.devolverAlheio");
       const btnDevolver = podeDevolver
         ? `<button data-acao="devolver" data-num="${Number(t.numero)}" class="px-3 py-1 rounded-full bg-[#0b57d0] hover:bg-[#0842a0] text-white text-[11px] font-semibold transition">Devolver</button>`
         : "";
-      const btnTransferir = this.usuarioAtual && this.usuarioAtual.perfil === "ADMIN"
+      const btnTransferir = this.pode("territorios.designar")
         ? `<button data-acao="admin-transferir" data-num="${Number(t.numero)}" class="px-3 py-1 rounded-full bg-slate-100 hover:bg-slate-200 text-slate-700 text-[11px] font-semibold transition">🔁 Transferir</button>`
         : "";
 

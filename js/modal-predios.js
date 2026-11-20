@@ -38,7 +38,7 @@ const ModalPredios = {
 
   podeEditar(t) {
     return Boolean(t && t.statusReal === "OCUPADO" &&
-      (t.emMinhaPosse || (App.usuarioAtual && App.usuarioAtual.perfil === "ADMIN")));
+      (t.emMinhaPosse || App.pode("progresso.alheio")));
   },
 
   abrir(numero, idPredioFoco) {
@@ -245,7 +245,7 @@ const ModalPredios = {
     const selo = r ? `<p class="mp-revisao">⏳ Correção em revisão: ${Number(r.andares)} andar(es) × ${Number(r.aptosPorAndar)} apto(s) por andar${r.criadaEm ? ` • enviada em ${Utils.escapeHtml(r.criadaEm)}` : ""}</p>` : "";
     if (!editar) return selo;
 
-    const ehAdmin = Boolean(App.usuarioAtual && App.usuarioAtual.perfil === "ADMIN");
+    const ehAdmin = App.pode("predios.revisar");
     if (this.editandoCadastro !== p.idPredio) {
       const convite = grade ? "Corrigir andares/aptos" : "Informar andares e aptos por andar";
       return `${selo}<button type="button" data-acao="predio-cadastro-editar" data-id-predio="${id}" class="mp-link-cadastro">✏️ ${convite}</button>`;
