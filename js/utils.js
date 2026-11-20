@@ -50,6 +50,20 @@ const Utils = {
    * Calcula a quantidade de dias corridos desde uma data até hoje.
    * Retorna Infinity caso nunca tenha sido trabalhado/devolvido.
    */
+  /** Spec 03: motivos fechados de inativação (mesma lista de MOTIVOS_INATIVACAO no Code.gs). */
+  MOTIVOS_INATIVACAO: {
+    FUSAO: "Fusão com outro território",
+    DIVISAO: "Divisão em novos territórios",
+    AREA_INEXISTENTE: "Área não existe mais",
+    TRANSFERIDO_OUTRA_CONGREGACAO: "Transferido para outra congregação",
+    ACESSO_IMPOSSIVEL: "Acesso impossível",
+    OUTRO: "Outro"
+  },
+
+  rotuloMotivoInativacao(motivo) {
+    return this.MOTIVOS_INATIVACAO[motivo] || String(motivo || "");
+  },
+
   calcularDiasDesdeData(isoDate) {
     const ts = this.obterTimestampData(isoDate);
     if (!ts) return Infinity;
@@ -86,11 +100,17 @@ const Utils = {
     AGUARDANDO: {
       rotulo: "Aguardando fila", preenchimento: "#FFFFFF", opacidade: 0.1, borda: "#64748B", peso: 1,
       badgeClass: "bg-[#e6f4ea] text-[#137333] border-[#ceead6]"
+    },
+    // Spec 03: só ADMIN/SUPERVISOR recebem inativos; a legenda mostra este item só para eles
+    INATIVO: {
+      rotulo: "Inativo", preenchimento: "#A1A1AA", opacidade: 0.12, borda: "#52525B", peso: 1, tracejado: "2 5",
+      badgeClass: "bg-slate-100 text-slate-500 border-slate-300", soGestao: true
     }
   },
 
   /** Chave de ESTILO_STATUS correspondente à situação do território para o usuário atual. */
   chaveStatus(t, naFilaTop5 = false) {
+    if (t.statusReal === "INATIVO") return "INATIVO";
     if (t.emMinhaPosse) return "COMIGO";
     if (t.statusReal === "OCUPADO") return "OCUPADO";
     if (t.statusReal === "RECENTE") return "RECENTE";

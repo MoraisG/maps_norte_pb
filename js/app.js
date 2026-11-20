@@ -617,6 +617,7 @@ const App = {
 
     this.atualizarIndicadores();
     this.atualizarContagemRevisoes();
+    this.renderizarInativosAdmin();
     this.renderizarCardsTerritorios();
     this.renderizarMeusTerritorios();
     this.renderizarDashboardOcupacao();
@@ -662,7 +663,9 @@ const App = {
         copia.predios = Utils.obterPrediosPadraoTerritorio(copia.numero);
       }
       if (!Array.isArray(copia.quadrasTrabalhadas)) copia.quadrasTrabalhadas = [];
-      if (copia.statusReal !== "OCUPADO") {
+      if (copia.statusReal === "INATIVO") {
+        copia.diasDesdeDevolucao = 0;   // spec 03: inativo não volta a DISPONÍVEL/RECENTE no cliente
+      } else if (copia.statusReal !== "OCUPADO") {
         const dias = Utils.calcularDiasDesdeData(copia.ultimaData);
         copia.diasDesdeDevolucao = dias;
         copia.statusReal = dias > Utils.DIAS_QUARENTENA_DEVOLUCAO ? "DISPONÍVEL" : "RECENTE";
@@ -1144,6 +1147,92 @@ const App = {
     if (!this.semConexao()) return false;
     Utils.mostrarToast(`${acao} precisa de conexão com a internet. As marcações de progresso continuam funcionando.`, "aviso");
     return true;
+  },
+
+  /** Spec 03: lista de inativos no painel ADMIN (o publicador nem recebe inativos do servidor). */
+  renderizarInativosAdmin() {
+    const el = document.getElementById("lista-territorios-inativos");
+    if (!el) return;
+    const inativos = this.territorios.filter(t => t.statusReal === "INATIVO").sort((a, b) => Number(a.numero) - Number(b.numero));
+    const cont = document.getElementById("count-territorios-inativos");
+    if (cont) cont.textContent = inativos.length;
+    el.innerHTML = inativos.length ? inativos.map(t => `
+      <div class="p-3 flex flex-wrap items-center justify-between gap-2">
+        <div class="min-w-0">
+          <p class="text-xs font-semibold text-slate-800">Território ${Number(t.numero)} — ${Utils.escapeHtml(t.bairro)}</p>
+          <p class="text-[11px] text-slate-500">${t.inativacao ? Utils.escapeHtml(Utils.rotuloMotivoInativacao(t.inativacao.motivo)) + (t.inativacao.em ? " · desde " + Utils.formatarDataBr(t.inativacao.em) : "") + (t.inativacao.observacao ? " · " + Utils.escapeHtml(t.inativacao.observacao) : "") : ""}</p>
+        </div>
+        <button data-acao="reativar-territorio" data-num="${Number(t.numero)}" class="px-3 py-1 rounded-full bg-[#d3e3fd] hover:bg-[#c2d7fc] text-[#041e49] text-[11px] font-semibold transition">Reativar</button>
+      </div>`).join("") : `<p class="p-3 text-[11px] text-slate-500">Nenhum território inativo.</p>`;
+  },
+
+  async acaoInativarTerritorio(numero) {
+    const t = this.territorios.find(x => Number(x.numero) === Number(numero));
+    if (!t) return;
+    const opcoes = Object.keys(Utils.MOTIVOS_INATIVACAO).map(k => `<option value="${k}">${Utils.escapeHtml(Utils.MOTIVOS_INATIVACAO[k])}</option>`).join("");
+    const ok = await ModalM3.confirmar({
+      icone: "🚫",
+      titulo: `Inativar o Território ${Number(t.numero)}?`,
+      subtituloHtml: `
+        <p><strong>${Utils.escapeHtml(t.bairro)}</strong> sai da fila, das contagens e da lista dos publicadores. O histórico é mantido e dá para reativar depois.</p>
+        <label for="inativar-motivo" class="block text-[11px] font-medium text-slate-600 mt-3 mb-1">Motivo</label>
+        <select id="inativar-motivo" class="w-full px-3 py-2 text-xs bg-slate-50 border border-slate-300 rounded-xl text-slate-900">${opcoes}</select>
+        <label for="inativar-obs" class="block text-[11px] font-medium text-slate-600 mt-2 mb-1">Observação (obrigatória em "Outro")</label>
+        <input id="inativar-obs" type="text" maxlength="300" class="w-full px-3 py-2 text-xs bg-slate-50 border border-slate-300 rounded-xl text-slate-900" />`,
+      textoConfirmar: "Inativar",
+      textoCancelar: "Cancelar",
+      variante: "perigo"
+    });
+    if (!ok) return;
+    const dados = {
+      numeroTerritorio: Number(t.numero),
+      motivo: document.getElementById("inativar-motivo")?.value || "",
+      observacao: (document.getElementById("inativar-obs")?.value || "").trim()
+    };
+    try {
+      let res;
+      try {
+        res = await ApiClient.request("admin/territorios/inativar", dados);
+      } catch (err) {
+        if (!(err.codigo === 409 && err.dados && err.dados.confirmacaoNecessaria)) throw err;
+        const confirmar = await ModalM3.confirmar({
+          icone: "⚠️",
+          titulo: "Cartão em campo",
+          mensagem: err.message,
+          textoConfirmar: "Devolver e inativar",
+          textoCancelar: "Cancelar",
+          variante: "perigo"
+        });
+        if (!confirmar) return;
+        res = await ApiClient.request("admin/territorios/inativar", Object.assign({ devolverSeOcupado: true }, dados));
+      }
+      Utils.mostrarToast(res.mensagem, "sucesso");
+      this._versaoListagem = "";
+      await this.sincronizarDados({ silencioso: true });
+    } catch (err) {
+      Utils.mostrarToast(err.message, "erro");
+    }
+  },
+
+  async acaoReativarTerritorio(numero) {
+    const t = this.territorios.find(x => Number(x.numero) === Number(numero));
+    if (!t) return;
+    const ok = await ModalM3.confirmar({
+      icone: "♻️",
+      titulo: `Reativar o Território ${Number(t.numero)}?`,
+      mensagem: `${t.bairro} volta para a fila conforme a data da última devolução.`,
+      textoConfirmar: "Reativar",
+      textoCancelar: "Cancelar"
+    });
+    if (!ok) return;
+    try {
+      const res = await ApiClient.request("admin/territorios/reativar", { numeroTerritorio: Number(t.numero) });
+      Utils.mostrarToast(res.mensagem, "sucesso");
+      this._versaoListagem = "";
+      await this.sincronizarDados({ silencioso: true });
+    } catch (err) {
+      Utils.mostrarToast(err.message, "erro");
+    }
   },
 
   async acaoDevolver(numero) {
@@ -2125,8 +2214,10 @@ const App = {
           numero: t.numero,
           bairro: t.bairro,
           tipo: t.tipo,
+          inativo: t.statusReal === "INATIVO",
           ciclos: Utils.filtrarCiclosPorAnoServico(t.ciclos || [], anoInicio)
-        }));
+        }))
+        .filter(t => !t.inativo || t.ciclos.length > 0);
     }
 
     try {
@@ -2156,7 +2247,10 @@ const App = {
 
     Utils.mostrarToast(`Gerando relatório do Ano de Serviço ${periodoStr}...`, "aviso");
 
-    const dadosTerritorios = await this.obterCiclosHistoricosParaRelatorio(anoInicio);
+    const todosDoRelatorio = await this.obterCiclosHistoricosParaRelatorio(anoInicio);
+    // Spec 03 / Q3: inativos com trabalho no ano vão para uma seção separada e não entram nos totais
+    const inativosRelatorio = todosDoRelatorio.filter(t => t.inativo && t.ciclos && t.ciclos.length > 0);
+    const dadosTerritorios = todosDoRelatorio.filter(t => !t.inativo);
     const filtrados = escopo === "TRABALHADOS"
       ? dadosTerritorios.filter(t => t.ciclos && t.ciclos.length > 0)
       : dadosTerritorios;
@@ -2166,7 +2260,7 @@ const App = {
     const totalDesignacoesPeriodo = dadosTerritorios.reduce((acc, t) => acc + (t.ciclos ? t.ciclos.length : 0), 0);
     const dataEmissao = new Date().toLocaleString("pt-BR");
 
-    const linhasHtml = filtrados.map(t => {
+    const montarLinhas = lista => lista.map(t => {
       const ciclos = t.ciclos || [];
       if (!ciclos.length) {
         return `
@@ -2194,6 +2288,8 @@ const App = {
         </tr>
       `).join("");
     }).join("");
+    const linhasHtml = montarLinhas(filtrados);
+    const linhasInativosHtml = montarLinhas(inativosRelatorio);
 
     const janelaPdf = window.open("", "_blank");
     if (!janelaPdf) {
@@ -2378,6 +2474,23 @@ const App = {
         ${linhasHtml}
       </tbody>
     </table>
+    ${inativosRelatorio.length ? `
+    <h3 style="margin:24px 0 8px 0;font-size:13px;">Territórios inativados com trabalho neste Ano de Serviço</h3>
+    <table>
+      <thead>
+        <tr>
+          <th class="col-num">Território</th>
+          <th>Bairro / Descrição</th>
+          <th>Tipo</th>
+          <th>Designado a (Dirigente)</th>
+          <th class="col-data">Data da Designação</th>
+          <th class="col-data">Data da Conclusão</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${linhasInativosHtml}
+      </tbody>
+    </table>` : ""}
   </div>
 
 </body>
@@ -2412,6 +2525,8 @@ const ACOES_UI = {
   "devolver": el => App.acaoDevolver(Number(el.dataset.num)),
   "modal-solicitar": el => { MapaTerritorios.fecharModalTerritorio(); return App.acaoSolicitar(Number(el.dataset.num)); },
   "modal-devolver": el => { MapaTerritorios.fecharModalTerritorio(); return App.acaoDevolver(Number(el.dataset.num)); },
+  "inativar-territorio": el => { MapaTerritorios.fecharModalTerritorio(); return App.acaoInativarTerritorio(Number(el.dataset.num)); },
+  "reativar-territorio": el => { MapaTerritorios.fecharModalTerritorio(); return App.acaoReativarTerritorio(Number(el.dataset.num)); },
   "alternar-selecao": el => App.alternarSelecaoTerritorio(Number(el.dataset.num)),
   "filtrar-fila-predios": () => App.filtrarFilaComPredios(),
   "editar-usuario": el => App.preencherFormUsuario(Number(el.dataset.idx)),
