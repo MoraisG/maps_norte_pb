@@ -473,6 +473,17 @@ function rotearRequisicaoInterna(metodo, payload) {
         exigirPermissao(usuario, "territorios.designar", rota);
         return executarComLock(() => transferirTerritorioAdminTransacional(usuario, payload));
 
+      // Spec 03: inativar / reativar território (histórico na aba TerritoriosHistorico)
+      case "admin/territorios/inativar":
+        if (metodo !== "POST") return erroMetodoNaoPermitido();
+        exigirPermissao(usuario, "territorios.inativar", rota);
+        return executarComLock(() => inativarTerritorioTransacional(usuario, payload));
+
+      case "admin/territorios/reativar":
+        if (metodo !== "POST") return erroMetodoNaoPermitido();
+        exigirPermissao(usuario, "territorios.inativar", rota);
+        return executarComLock(() => reativarTerritorioTransacional(usuario, payload));
+
       case "admin/pontos/importar":
         if (metodo !== "POST") return erroMetodoNaoPermitido();
         exigirPermissao(usuario, "pontos.importar", rota);
@@ -727,6 +738,7 @@ const PERMISSOES = {
   "territorios.devolverAlheio": ["ADMIN", "SUPERVISOR"],  // SUPERVISOR depende da ScriptProperty
   "territorios.foraDaFila": ["ADMIN"],
   "territorios.designar": ["ADMIN"],
+  "territorios.inativar": ["ADMIN"],                     // spec 03: inativar / reativar
   "progresso.alheio": ["ADMIN"],                          // marcar prédio/quadra/casa de cartão alheio
   "pontos.verEnderecos": ["ADMIN"],
   "pontos.importar": ["ADMIN"],
@@ -1109,6 +1121,9 @@ function consolidarBaseTerritorios() {
     }
   }
 
+  // 2b. Territórios inativados (spec 03): último evento INATIVAR/REATIVAR de cada número
+  const inativacoes = carregarInativacoes(ss);
+
   // 3. Processar todo o histórico da aba 'Respostas' de forma 100% independente da ordem das linhas
   const emailPorNomeFallback = {};
   const historicoPorTerritorio = {};
@@ -1232,6 +1247,10 @@ function consolidarBaseTerritorios() {
       ciclos.push(cicloAberto);
     }
 
+    // Inativo prevalece sobre o status calculado (a inativação já devolveu o cartão, se estava em campo)
+    const inativacao = inativacoes[num] || null;
+    if (inativacao) statusReal = "INATIVO";
+
     resultado.push({
       _chave: num,
       numero: Number(num),
@@ -1245,14 +1264,17 @@ function consolidarBaseTerritorios() {
       wkt: infoBase.wkt,
       _dirigente: dirigenteAtual,
       _emailPosse: emailAtual,
-      _ciclos: ciclos
+      _ciclos: ciclos,
+      _inativacao: inativacao
     });
   }
 
-  // Ordenação padrão por antiguidade (nunca trabalhados ou devolvidos há mais tempo primeiro)
+  // Ordenação padrão por antiguidade (nunca trabalhados ou devolvidos há mais tempo primeiro);
+  // ocupados depois e inativos por último
+  const pesoStatus = t => t.statusReal === "INATIVO" ? 2 : t.statusReal === "OCUPADO" ? 1 : 0;
   resultado.sort((a, b) => {
-    const aOcupado = a.statusReal === "OCUPADO" ? 1 : 0;
-    const bOcupado = b.statusReal === "OCUPADO" ? 1 : 0;
+    const aOcupado = pesoStatus(a);
+    const bOcupado = pesoStatus(b);
     if (aOcupado !== bOcupado) return aOcupado - bOcupado;
 
     if (a.ultimaData !== b.ultimaData) {
@@ -1281,7 +1303,7 @@ function projetarTerritoriosParaUsuario(base, progresso, usuarioSolicitante) {
   const predios = (progresso && progresso.predios) || {};
   const quadras = (progresso && progresso.quadras) || {};
 
-  return base.territorios.map(t => {
+  return base.territorios.filter(t => t.statusReal !== "INATIVO" || veGestao).map(t => {
     const ocupado = t.statusReal === "OCUPADO";
 
     // Identificador único por e-mail (ou match de nome caso linha manual antiga não tenha e-mail)
@@ -1324,7 +1346,8 @@ function projetarTerritoriosParaUsuario(base, progresso, usuarioSolicitante) {
       quadrasTrabalhadas: ocupado ? (quadras[String(t.numero)] || []) : [],
       pontosRurais: vePontos ? listaPontos : [],
       totalPontosRurais: listaPontos.length,
-      pontosRuraisVisitados: listaPontos.filter(p => p.visitadoEm).length
+      pontosRuraisVisitados: listaPontos.filter(p => p.visitadoEm).length,
+      inativacao: t._inativacao ? { em: t._inativacao.em, motivo: t._inativacao.motivo, observacao: t._inativacao.observacao } : null
     };
   });
 }
@@ -1574,6 +1597,133 @@ function solicitarTerritorioTransacional(usuario, payload) {
  * qualquer um dos filtros oferecidos na tela (Geral, Com Prédios, Urbano, Rural).
  * A lista recebida já vem ordenada por antiguidade por listarTodosTerritoriosConsolidados.
  */
+/**
+ * ============================================================================
+ * SPEC 03 — INATIVAR / REATIVAR TERRITÓRIO
+ * ============================================================================
+ * Aba TerritoriosHistorico (só acréscimo, nunca apagada): o último evento de cada número decide
+ * se ele está inativo. Inativação não grava nada em Respostas (não polui o "Meu Histórico").
+ */
+const ABA_TERRITORIOS_HISTORICO = "TerritoriosHistorico";
+const CABECALHO_TERRITORIOS_HISTORICO = ["IdEvento", "DataHora", "Numero", "Acao", "Email", "Nome", "Motivo", "Observacao"];
+const MOTIVOS_INATIVACAO = ["FUSAO", "DIVISAO", "AREA_INEXISTENTE", "TRANSFERIDO_OUTRA_CONGREGACAO", "ACESSO_IMPOSSIVEL", "OUTRO"];
+
+function obterAbaTerritoriosHistorico(ss, criar) {
+  let sheet = ss.getSheetByName(ABA_TERRITORIOS_HISTORICO);
+  if (!sheet && criar) {
+    sheet = ss.insertSheet(ABA_TERRITORIOS_HISTORICO);
+    sheet.appendRow(CABECALHO_TERRITORIOS_HISTORICO);
+  }
+  return sheet;
+}
+
+/** { numero: { em, motivo, observacao, nome } } dos territórios cujo último evento é INATIVAR. */
+function carregarInativacoes(ss) {
+  const sheet = obterAbaTerritoriosHistorico(ss, false);
+  if (!sheet) return {};
+  const dados = sheet.getDataRange().getValues();
+  const ultimo = {};
+  for (let i = 1; i < dados.length; i++) {
+    const num = String(dados[i][2] || "").trim().replace(/^0+/, "");
+    const acao = String(dados[i][3] || "").trim().toUpperCase();
+    if (!num || (acao !== "INATIVAR" && acao !== "REATIVAR")) continue;
+    ultimo[num] = { acao: acao, linha: dados[i] };   // linhas só são acrescentadas: a última vale
+  }
+  const fuso = Session.getScriptTimeZone();
+  const resultado = {};
+  for (const num in ultimo) {
+    if (ultimo[num].acao !== "INATIVAR") continue;
+    const l = ultimo[num].linha;
+    const ts = extrairTimestamp(l[1]);
+    resultado[num] = {
+      em: ts ? Utilities.formatDate(new Date(ts), fuso, "yyyy-MM-dd") : "",
+      motivo: String(l[6] || ""),
+      observacao: String(l[7] || ""),
+      nome: String(l[5] || "")
+    };
+  }
+  return resultado;
+}
+
+function registrarEventoTerritorio(ss, num, acao, usuario, motivo, observacao) {
+  const sheet = obterAbaTerritoriosHistorico(ss, true);
+  sheet.appendRow(sanitizarLinha([
+    "TER-" + Utilities.getUuid().slice(0, 8).toUpperCase(),
+    new Date(),
+    Number(num),
+    acao,
+    usuario.email,
+    usuario.nome,
+    motivo || "",
+    observacao || ""
+  ], 300));
+}
+
+/**
+ * payload: { numeroTerritorio, motivo, observacao, devolverSeOcupado }.
+ * Cartão em campo: 409 com confirmacaoNecessaria; confirmado (devolverSeOcupado), devolve antes (spec 03 / Q2).
+ */
+function inativarTerritorioTransacional(admin, payload) {
+  const num = String((payload && payload.numeroTerritorio) || "").trim().replace(/^0+/, "");
+  if (!num || isNaN(Number(num))) return respostaJson({ sucesso: false, codigo: 400, erro: "Número de território inválido." });
+
+  const motivo = String((payload && payload.motivo) || "").toUpperCase().trim();
+  if (MOTIVOS_INATIVACAO.indexOf(motivo) === -1) return respostaJson({ sucesso: false, codigo: 400, erro: "Selecione o motivo da inativação." });
+  const observacao = String((payload && payload.observacao) || "").trim().replace(/\s+/g, " ").slice(0, 300);
+  if (motivo === "OUTRO" && observacao.length < 3) return respostaJson({ sucesso: false, codigo: 400, erro: "Descreva o motivo na observação." });
+
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const todos = listarTodosTerritoriosConsolidados(admin, { fresco: true });
+  const territorio = todos.find(t => String(t.numero) === num);
+  if (!territorio) return respostaJson({ sucesso: false, codigo: 404, erro: `O território ${num} não existe na base.` });
+  if (territorio.statusReal === "INATIVO") return respostaJson({ sucesso: false, codigo: 409, erro: `O território ${num} já está inativo.` });
+
+  let notaDevolucao = "";
+  if (territorio.statusReal === "OCUPADO") {
+    if (!(payload && payload.devolverSeOcupado === true)) {
+      return respostaJson({
+        sucesso: false,
+        codigo: 409,
+        confirmacaoNecessaria: true,
+        dirigente: territorio.dirigente || "",
+        erro: `O território ${num} está em campo com ${territorio.dirigente || "um dirigente"}. Confirme para devolver o cartão e inativar.`
+      });
+    }
+    const r = devolverTerritorioTransacional(admin, { numeroTerritorio: num, foiCompleto: false, motivoNaoCompleto: "QUADRAS_FALTANTES" });
+    let resposta = null;
+    try { resposta = JSON.parse(r.getContent()); } catch (e) {}
+    if (!resposta || resposta.sucesso !== true) {
+      return respostaJson({ sucesso: false, codigo: 409, erro: "Não foi possível devolver o cartão antes de inativar: " + ((resposta && resposta.erro) || "erro desconhecido") });
+    }
+    notaDevolucao = ` O cartão que estava com ${territorio.dirigente || "o dirigente"} foi devolvido.`;
+  }
+
+  registrarEventoTerritorio(ss, num, "INATIVAR", admin, motivo, observacao);
+  SpreadsheetApp.flush();
+  registrarAuditoria("TERRITORIO_INATIVAR", admin.nome, admin.email, num, "SUCESSO",
+    `Motivo: ${motivo}${observacao ? " | " + observacao : ""}${notaDevolucao ? " | cartão devolvido" : ""}`);
+  return respostaJson({
+    sucesso: true,
+    mensagem: `Território ${num} (${territorio.bairro}) inativado. Ele sai da fila e das contagens.${notaDevolucao}`
+  });
+}
+
+function reativarTerritorioTransacional(admin, payload) {
+  const num = String((payload && payload.numeroTerritorio) || "").trim().replace(/^0+/, "");
+  if (!num || isNaN(Number(num))) return respostaJson({ sucesso: false, codigo: 400, erro: "Número de território inválido." });
+
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const todos = listarTodosTerritoriosConsolidados(admin, { fresco: true });
+  const territorio = todos.find(t => String(t.numero) === num);
+  if (!territorio) return respostaJson({ sucesso: false, codigo: 404, erro: `O território ${num} não existe na base.` });
+  if (territorio.statusReal !== "INATIVO") return respostaJson({ sucesso: false, codigo: 409, erro: `O território ${num} não está inativo.` });
+
+  registrarEventoTerritorio(ss, num, "REATIVAR", admin, "", String((payload && payload.observacao) || "").trim().slice(0, 300));
+  SpreadsheetApp.flush();
+  registrarAuditoria("TERRITORIO_REATIVAR", admin.nome, admin.email, num, "SUCESSO", "Reativado");
+  return respostaJson({ sucesso: true, mensagem: `Território ${num} (${territorio.bairro}) reativado. Ele volta à fila conforme a data da última devolução.` });
+}
+
 function calcularNumerosElegiveisFila(todosOrdenados) {
   const limite = CONFIG.LIMITE_FILA;
   const disponiveis = todosOrdenados.filter(t => t.statusReal === "DISPONÍVEL");
@@ -1775,6 +1925,9 @@ function designarTerritorioAdminTransacional(admin, payload) {
   if (!territorio) {
     return respostaJson({ sucesso: false, codigo: 404, erro: `O território ${num} não existe na base.` });
   }
+  if (territorio.statusReal === "INATIVO") {
+    return respostaJson({ sucesso: false, codigo: 409, erro: `O território ${num} está inativo. Reative-o antes de designar.` });
+  }
   if (territorio.statusReal === "OCUPADO") {
     registrarAuditoria("ADMIN_DESIGNAR_TERRITORIO", admin.nome, admin.email, num, "NEGADO", `Já está com ${territorio.dirigente}`);
     return respostaJson({
@@ -1970,9 +2123,10 @@ function gerarDadosRelatorioAnoServico(usuario, anoInicioParam) {
       statusAtual: t.statusReal,
       dirigenteAtual: t.dirigente,
       ultimaData: t.ultimaData,
+      inativo: t.statusReal === "INATIVO",
       ciclos: ciclosPeriodo
     };
-  });
+  }).filter(t => !t.inativo || t.ciclos.length > 0);
 
   return {
     anoInicio: anoInicio,

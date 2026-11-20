@@ -33,7 +33,7 @@ const MapaTerritorios = {
   CHAVE_ESRI: "",
   FALHAS_SATELITE_PARA_DESISTIR: 4,
   ZOOM_MIN_DETALHES: 15,          // quadras numeradas e pinos de prédios só a partir deste zoom
-  VERSAO_QUADRAS_GEO: 27,         // manter igual à VERSAO de sw.js (vale também para vias-rurais.geojson)
+  VERSAO_QUADRAS_GEO: 28,         // manter igual à VERSAO de sw.js (vale também para vias-rurais.geojson)
   ZOOM_MIN_NOMES_VIAS: 14,        // nomes das estradas rurais só a partir deste zoom
   ATRIBUICAO_OSM: '&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener noreferrer">OpenStreetMap</a> contributors',
   _localizacao: new Map(),        // mapa -> estado do "minha posição" (GPS)
@@ -546,7 +546,7 @@ const MapaTerritorios = {
   renderizarLegenda() {
     const el = document.getElementById("mapa-legenda");
     if (!el) return;
-    el.innerHTML = Object.keys(Utils.ESTILO_STATUS).map(chave => {
+    el.innerHTML = Object.keys(Utils.ESTILO_STATUS).filter(chave => !Utils.ESTILO_STATUS[chave].soGestao || App.pode("gestao.visualizar")).map(chave => {
       const e = Utils.ESTILO_STATUS[chave];
       const fundo = e.hachura
         ? `repeating-linear-gradient(45deg, ${this.hexParaRgba(e.preenchimento, 0.3)} 0 3px, ${this.hexParaRgba(e.borda, 0.75)} 3px 4.5px)`
@@ -1200,10 +1200,19 @@ const MapaTerritorios = {
         <button data-acao="modal-devolver" data-num="${Number(t.numero)}" class="m3-btn-filled text-xs">
           Devolver Território ${Number(t.numero)}
         </button>`;
+    } else if (t.statusReal === "INATIVO") {
+      const motivo = t.inativacao ? Utils.rotuloMotivoInativacao(t.inativacao.motivo) : "";
+      acoesEl.innerHTML = `<span class="text-xs text-slate-500">🚫 Inativo${t.inativacao && t.inativacao.em ? " desde " + Utils.formatarDataBr(t.inativacao.em) : ""}${motivo ? " — " + Utils.escapeHtml(motivo) : ""}.</span>`;
     } else if (t.statusReal === "RECENTE") {
       acoesEl.innerHTML = `<span class="text-xs text-slate-500">⏳ Em período de descanso de 120 dias após conclusão.</span>`;
     } else {
       acoesEl.innerHTML = `<span class="text-xs text-slate-500">Consulte os prédios e limites deste cartão no mapa acima.</span>`;
+    }
+    // Spec 03: ADMIN inativa / reativa pelo cartão
+    if (App.pode("territorios.inativar")) {
+      acoesEl.innerHTML = `<div class="flex flex-wrap items-center gap-2">${acoesEl.innerHTML}${t.statusReal === "INATIVO"
+        ? `<button data-acao="reativar-territorio" data-num="${Number(t.numero)}" class="m3-btn-tonal text-xs">Reativar</button>`
+        : `<button data-acao="inativar-territorio" data-num="${Number(t.numero)}" class="px-3 py-1.5 rounded-full text-xs font-semibold text-[#b3261e] hover:bg-[#fce8e6] transition">Inativar</button>`}</div>`;
     }
 
     modal.classList.remove("hidden");

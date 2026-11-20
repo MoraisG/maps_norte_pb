@@ -151,6 +151,8 @@ body {
 .leaflet-container {
   background: #eef2f6;
   font-family: inherit;
+  /* As camadas do Leaflet usam z-index 400+: sem isolar, o mapa geral fica por cima das modais (z-50) */
+  isolation: isolate;
 }
 .leaflet-container .leaflet-control-attribution {
   font-size: 10px;

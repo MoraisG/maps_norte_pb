@@ -21,7 +21,7 @@
   const PERMISSOES_POR_PERFIL = {
     ADMIN: ["gestao.visualizar", "territorios.devolverAlheio", "territorios.foraDaFila", "territorios.designar", "progresso.alheio",
       "pontos.verEnderecos", "pontos.importar", "predios.revisar", "auditoria.territorios", "auditoria.completa",
-      "usuarios.verEmail", "usuarios.gerenciar", "lembretes.disparar"],
+      "usuarios.verEmail", "usuarios.gerenciar", "lembretes.disparar", "territorios.inativar"],
     SUPERVISOR: ["gestao.visualizar", "territorios.devolverAlheio", "auditoria.territorios"],
     PUBLICADOR: []
   };
@@ -133,7 +133,7 @@
   }
 
   function listar() {
-    return copiar(territorios).map(t => {
+    return copiar(territorios).filter(t => t.statusReal !== "INATIVO" || pode("gestao.visualizar")).map(t => {
       if (perfil !== "ADMIN") {
         t.emailDirigente = "";
         if (t.statusReal !== "OCUPADO") t.dirigente = "";
@@ -392,6 +392,29 @@
       return { mensagem: `Território ${t.numero} (${t.bairro}) transferido de ${anterior} para ${nome}. Início do trabalho mantido em ${Utils.formatarDataBr(t.ultimaData)}.` };
     },
     "admin/auditoria": () => ({ logs: copiar(auditoria) }),
+    // Spec 03 (simulação): mesmo contrato do backend
+    "admin/territorios/inativar": p => {
+      const t = acharTerritorio(p.numeroTerritorio);
+      if (!p.motivo) throw erro(400, "Selecione o motivo da inativação.");
+      if (p.motivo === "OUTRO" && String(p.observacao || "").trim().length < 3) throw erro(400, "Descreva o motivo na observação.");
+      if (t.statusReal === "INATIVO") throw erro(409, "O território já está inativo.");
+      if (t.statusReal === "OCUPADO" && p.devolverSeOcupado !== true) {
+        const e = erro(409, `O território ${t.numero} está em campo com ${t.dirigente || "um dirigente"}. Confirme para devolver o cartão e inativar.`);
+        e.dados = { confirmacaoNecessaria: true };
+        throw e;
+      }
+      t.statusReal = "INATIVO";
+      t.emMinhaPosse = false;
+      t.inativacao = { em: new Date().toISOString().slice(0, 10), motivo: p.motivo, observacao: p.observacao || "" };
+      return { mensagem: `Território ${t.numero} inativado (simulação).` };
+    },
+    "admin/territorios/reativar": p => {
+      const t = acharTerritorio(p.numeroTerritorio);
+      if (t.statusReal !== "INATIVO") throw erro(409, "O território não está inativo.");
+      t.statusReal = "DISPONÍVEL";
+      t.inativacao = null;
+      return { mensagem: `Território ${t.numero} reativado (simulação).` };
+    },
     "admin/usuarios/salvar": () => ({ mensagem: "Simulação: o usuário não foi gravado (modo local)." }),
     "admin/lembretes/disparar": () => ({ mensagem: "Simulação: nenhum e-mail foi enviado (modo local)." })
   };
