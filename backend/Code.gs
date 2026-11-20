@@ -62,10 +62,7 @@ function lerPropriedade(chave, padrao) {
  */
 function configClienteAutenticado() {
   return {
-    chaveEsri: String(lerPropriedade("ESRI_API_KEY", "") || "").trim(),
-    // Pacote offline de imagens de satélite (Spec 06, fase 5): só é oferecido quando a licença do
-    // provedor de imagens permitir guardar ladrilhos. Ligar com OFFLINE_SATELITE_PERMITIDO = true.
-    offlineSatelite: lerPropriedade("OFFLINE_SATELITE_PERMITIDO", "false") === "true"
+    chaveEsri: String(lerPropriedade("ESRI_API_KEY", "") || "").trim()
   };
 }
 

@@ -114,6 +114,7 @@ function criarAmbienteSw() {
     for (const arq of a.sw.STATIC_ASSETS) a.rede.set(a.absoluta(arq), { corpo: "v-nova:" + arq });
     a.armazens.set("territorios-pwa-shell-v13", new Map([[ORIGEM + "/velho.js", a.criarResposta("velho")]]));
     a.armazens.set("territorios-tiles-12", new Map([[ORIGEM + "/ladrilho", a.criarResposta("ladrilho")]]));
+    a.armazens.set("outro-cache", new Map([[ORIGEM + "/x", a.criarResposta("x")]]));
 
     await a.disparar("install").espera();
     const casca = a.armazens.get(a.sw.CACHE_NAME);
@@ -121,7 +122,8 @@ function criarAmbienteSw() {
 
     await a.disparar("activate").espera();
     assert.ok(!a.armazens.has("territorios-pwa-shell-v13"), "casca antiga removida na ativação");
-    assert.ok(a.armazens.has("territorios-tiles-12"), "caches que não são da casca (pacotes offline) são preservados");
+    assert.ok(!a.armazens.has("territorios-tiles-12"), "sobras do pacote de satélite removido são apagadas (spec 07 / Q9)");
+    assert.ok(a.armazens.has("outro-cache"), "caches que não são do app são preservados");
     assert.ok(a.armazens.has(a.sw.CACHE_NAME), "casca atual preservada");
   }
 
