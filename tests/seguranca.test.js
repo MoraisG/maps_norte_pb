@@ -24,7 +24,7 @@ assert.ok(t.compararSeguro("abc","abc")); assert.ok(!t.compararSeguro("abc","abd
 // F6
 let ok=0; for (let i=0;i<70;i++) if (t.consumirCota("T",60,60)) ok++; assert.strictEqual(ok,60);
 // F5
-assert.deepStrictEqual(Object.keys(t.usuarioPublico({id:1,nome:"a",email:"e",perfil:"P",status:"ATIVO",linhaPlanilha:9})).sort(), ["email","id","nome","perfil","status"]);
+assert.deepStrictEqual(Object.keys(t.usuarioPublico({id:1,nome:"a",email:"e",perfil:"P",status:"ATIVO",linhaPlanilha:9})).sort(), ["email","id","nome","perfil","permissoes","status"]);
 // Chave de mapas: vem só da ScriptProperty (nunca do código) e vazia quando não configurada
 assert.deepStrictEqual(Object.keys(t.configClienteAutenticado()), ["chaveEsri", "offlineSatelite"]);
 assert.strictEqual(t.configClienteAutenticado().chaveEsri, "");

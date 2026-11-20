@@ -15,8 +15,18 @@
     return;
   }
 
-  const perfil = new URLSearchParams(location.search).get("perfil") === "PUBLICADOR" ? "PUBLICADOR" : "ADMIN";
-  const usuario = { id: 1, nome: "Dirigente Local", email: "local@exemplo.test", perfil: perfil, status: "ATIVO" };
+  const perfilUrl = String(new URLSearchParams(location.search).get("perfil") || "").toUpperCase();
+  const perfil = ["PUBLICADOR", "SUPERVISOR"].indexOf(perfilUrl) >= 0 ? perfilUrl : "ADMIN";
+  // Mesma matriz do backend (Code.gs, PERMISSOES), na forma que o servidor envia ao cliente
+  const PERMISSOES_POR_PERFIL = {
+    ADMIN: ["gestao.visualizar", "territorios.devolverAlheio", "territorios.foraDaFila", "territorios.designar", "progresso.alheio",
+      "pontos.verEnderecos", "pontos.importar", "predios.revisar", "auditoria.territorios", "auditoria.completa",
+      "usuarios.verEmail", "usuarios.gerenciar", "lembretes.disparar"],
+    SUPERVISOR: ["gestao.visualizar", "territorios.devolverAlheio", "auditoria.territorios"],
+    PUBLICADOR: []
+  };
+  const pode = acao => PERMISSOES_POR_PERFIL[perfil].indexOf(acao) >= 0;
+  const usuario = { id: 1, nome: "Dirigente Local", email: "local@exemplo.test", perfil: perfil, status: "ATIVO", permissoes: PERMISSOES_POR_PERFIL[perfil] };
   const OUTROS = ["Ana Teste", "Bruno Teste", "Carla Teste", "Diego Teste"];
 
   // Mesma regra do gerador de quadras: territórios acima de 60 ha são tratados como rurais
@@ -185,7 +195,7 @@
     "territorios/devolver": p => {
       const t = acharTerritorio(p.numeroTerritorio);
       if (t.statusReal !== "OCUPADO") throw erro(409, `O território ${t.numero} não consta como ocupado no momento.`);
-      if (perfil !== "ADMIN" && !t.emMinhaPosse) throw erro(403, "Operação negada: o território está com outro dirigente.");
+      if (!pode("territorios.devolverAlheio") && !t.emMinhaPosse) throw erro(403, "Operação negada: o território está com outro dirigente.");
 
       const naoIniciado = p.foiCompleto === false && p.motivoNaoCompleto === "NAO_INICIADO";
       t.quadrasTrabalhadas = []; // alfinetes são sempre apagados na devolução
@@ -401,7 +411,8 @@
     await new Promise(r => setTimeout(r, 150)); // pequena latência para os estados de "carregando" aparecerem
     const tratador = ROTAS[rota];
     if (!tratador) throw erro(404, `Rota '${rota}' não existe na API simulada.`);
-    if (rota.startsWith("admin/") && perfil !== "ADMIN") throw erro(403, "403 Forbidden — Operação exclusiva para perfil ADMIN.");
+    const exigida = rota === "admin/auditoria" ? "auditoria.territorios" : rota === "relatorios/ano-servico" ? "gestao.visualizar" : rota.startsWith("admin/") ? "usuarios.gerenciar" : "";
+    if (exigida && !pode(exigida)) throw erro(403, "Seu perfil não tem permissão para esta operação.");
     const resposta = tratador(payload || {});
     console.debug("[API simulada]", rota, payload || {}, resposta);
     return Object.assign({ sucesso: true }, resposta);

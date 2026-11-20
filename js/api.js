@@ -163,6 +163,7 @@ const ApiClient = {
       err.codigo = data.codigo || 400;
       err.conflitos = data.conflitos || [];
       err.territorios = data.territorios || null;
+      err.dados = data;
       throw err;
     }
 

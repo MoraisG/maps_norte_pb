@@ -248,7 +248,8 @@ function usuarioPublico(usuario) {
     nome: usuario.nome,
     email: usuario.email,
     perfil: usuario.perfil,
-    status: usuario.status
+    status: usuario.status,
+    permissoes: permissoesDoUsuario(usuario)
   };
 }
 
@@ -432,6 +433,7 @@ function rotearRequisicaoInterna(metodo, payload) {
         });
 
       case "relatorios/ano-servico":
+        exigirPermissao(usuario, "gestao.visualizar", rota);
         return respostaJson({
           sucesso: true,
           relatorio: gerarDadosRelatorioAnoServico(usuario, payload.anoInicio)
@@ -439,7 +441,8 @@ function rotearRequisicaoInterna(metodo, payload) {
 
       // --- DOMÍNIO: ADMINISTRAÇÃO (EXCLUSIVO ADMIN) ---
       case "admin/dashboard":
-        exigirPerfilAdmin(usuario, rota);
+      case "gestao/dashboard":
+        exigirPermissao(usuario, "gestao.visualizar", rota);
         return respostaJson({
           sucesso: true,
           resumo: obterIndicadoresAdmin(usuario),
@@ -447,7 +450,7 @@ function rotearRequisicaoInterna(metodo, payload) {
         });
 
       case "admin/usuarios/listar":
-        exigirPerfilAdmin(usuario, rota);
+        exigirPermissao(usuario, "usuarios.gerenciar", rota);
         return respostaJson({
           sucesso: true,
           usuarios: listarTodosUsuariosAdmin()
@@ -455,45 +458,45 @@ function rotearRequisicaoInterna(metodo, payload) {
 
       case "admin/usuarios/salvar":
         if (metodo !== "POST") return erroMetodoNaoPermitido();
-        exigirPerfilAdmin(usuario, rota);
+        exigirPermissao(usuario, "usuarios.gerenciar", rota);
         return executarComLock(() => salvarOuAlterarUsuarioAdmin(usuario, payload.dadosUsuario), []);
 
       // Designação direta de um cartão a um dirigente (fora da fila), com data de início informada
       case "admin/territorios/designar":
         if (metodo !== "POST") return erroMetodoNaoPermitido();
-        exigirPerfilAdmin(usuario, rota);
+        exigirPermissao(usuario, "territorios.designar", rota);
         return executarComLock(() => designarTerritorioAdminTransacional(usuario, payload));
 
       // Troca o dirigente de um cartão em campo, mantendo a data de início do trabalho
       case "admin/territorios/transferir":
         if (metodo !== "POST") return erroMetodoNaoPermitido();
-        exigirPerfilAdmin(usuario, rota);
+        exigirPermissao(usuario, "territorios.designar", rota);
         return executarComLock(() => transferirTerritorioAdminTransacional(usuario, payload));
 
       case "admin/pontos/importar":
         if (metodo !== "POST") return erroMetodoNaoPermitido();
-        exigirPerfilAdmin(usuario, rota);
+        exigirPermissao(usuario, "pontos.importar", rota);
         return executarComLock(() => importarPontosRuraisAdmin(usuario, payload), ["PROG"]);
 
       case "admin/predios/revisoes":
-        exigirPerfilAdmin(usuario, rota);
+        exigirPermissao(usuario, "predios.revisar", rota);
         return respostaJson(Object.assign({ sucesso: true }, listarRevisoesPrediosAdmin(30)));
 
       case "admin/predios/revisar":
         if (metodo !== "POST") return erroMetodoNaoPermitido();
-        exigirPerfilAdmin(usuario, rota);
+        exigirPermissao(usuario, "predios.revisar", rota);
         return executarComLock(() => revisarCadastroPredioTransacional(usuario, payload), ["PROG"]);
 
       case "admin/auditoria":
-        exigirPerfilAdmin(usuario, rota);
+        exigirPermissao(usuario, "auditoria.territorios", rota);
         return respostaJson({
           sucesso: true,
-          logs: listarAuditoriaAdmin(150)
+          logs: listarAuditoriaAdmin(150, !temPermissao(usuario, "auditoria.completa"))
         });
 
       case "admin/lembretes/disparar":
         if (metodo !== "POST") return erroMetodoNaoPermitido();
-        exigirPerfilAdmin(usuario, rota);
+        exigirPermissao(usuario, "lembretes.disparar", rota);
         const relatorio = dispararLembretesPorEmail(usuario);
         return respostaJson({
           sucesso: true,
@@ -508,6 +511,9 @@ function rotearRequisicaoInterna(metodo, payload) {
   } catch (err) {
     if (err.message === "FORBIDDEN_ADMIN") {
       return respostaJson({ sucesso: false, codigo: 403, erro: "403 Forbidden — Operação exclusiva para perfil ADMIN." });
+    }
+    if (String(err.message || "").indexOf("FORBIDDEN:") === 0) {
+      return respostaJson({ sucesso: false, codigo: 403, erro: "Seu perfil não tem permissão para esta operação." });
     }
     Logger.log("Erro na API: " + err.stack);
     medirFlag("erro500");
@@ -707,6 +713,59 @@ function exigirPerfilAdmin(usuario, rota) {
 }
 
 /**
+ * ============================================================================
+ * MATRIZ DE PERMISSÕES (Spec 02) — ADMIN, SUPERVISOR, PUBLICADOR
+ * ============================================================================
+ * Decisões (spec/DECISOES.md, 2026-11-20): SUPERVISOR vê gestão (nomes, Em Campo, S-13),
+ * devolve cartão de outro dirigente (ScriptProperty SUPERVISOR_PODE_DEVOLVER_ALHEIO, padrão true)
+ * e vê só a auditoria de territórios, sem e-mails. PUBLICADOR não vê Em Campo nem S-13.
+ */
+const PERFIS_VALIDOS = ["ADMIN", "SUPERVISOR", "PUBLICADOR"];
+
+const PERMISSOES = {
+  "gestao.visualizar": ["ADMIN", "SUPERVISOR"],          // nomes nos ciclos, Em Campo, S-13, dashboard
+  "territorios.devolverAlheio": ["ADMIN", "SUPERVISOR"],  // SUPERVISOR depende da ScriptProperty
+  "territorios.foraDaFila": ["ADMIN"],
+  "territorios.designar": ["ADMIN"],
+  "progresso.alheio": ["ADMIN"],                          // marcar prédio/quadra/casa de cartão alheio
+  "pontos.verEnderecos": ["ADMIN"],
+  "pontos.importar": ["ADMIN"],
+  "predios.revisar": ["ADMIN"],
+  "auditoria.territorios": ["ADMIN", "SUPERVISOR"],
+  "auditoria.completa": ["ADMIN"],
+  "usuarios.verEmail": ["ADMIN"],
+  "usuarios.gerenciar": ["ADMIN"],
+  "lembretes.disparar": ["ADMIN"]
+};
+
+function normalizarPerfil(valor) {
+  const p = String(valor || "").toUpperCase().trim();
+  return PERFIS_VALIDOS.indexOf(p) >= 0 ? p : "PUBLICADOR";
+}
+
+function temPermissao(usuario, acao) {
+  if (!usuario) return false;
+  const perfil = normalizarPerfil(usuario.perfil);
+  if ((PERMISSOES[acao] || []).indexOf(perfil) === -1) return false;
+  if (acao === "territorios.devolverAlheio" && perfil === "SUPERVISOR") {
+    return lerPropriedade("SUPERVISOR_PODE_DEVOLVER_ALHEIO", "true") === "true";
+  }
+  return true;
+}
+
+/** Lista enviada ao cliente só para montar a interface; o servidor sempre revalida. */
+function permissoesDoUsuario(usuario) {
+  return Object.keys(PERMISSOES).filter(acao => temPermissao(usuario, acao));
+}
+
+function exigirPermissao(usuario, acao, rota) {
+  if (!temPermissao(usuario, acao)) {
+    registrarAuditoria("ACESSO_NEGADO", usuario ? usuario.nome : "-", usuario ? usuario.email : "-", "-", "NEGADO", `Rota ${rota} exige ${acao} (perfil ${usuario ? usuario.perfil : "-"})`);
+    throw new Error("FORBIDDEN:" + acao);
+  }
+}
+
+/**
  * Inicializa e popula automaticamente as abas 'Usuarios' e 'Auditoria' caso ainda não existam
  */
 function inicializarAbasSegurancaSeNecessario() {
@@ -761,7 +820,7 @@ function buscarUsuarioAutorizado(email, atualizarAcesso) {
         id: String(dados[i][0] || `USR-${i}`),
         nome: String(dados[i][1] || "").trim(),
         email: rowEmail,
-        perfil: String(dados[i][3] || "PUBLICADOR").toUpperCase().trim(),
+        perfil: normalizarPerfil(dados[i][3]),
         status: String(dados[i][4] || "INATIVO").toUpperCase().trim(),
         linhaPlanilha: i + 1
       };
@@ -1212,11 +1271,13 @@ function consolidarBaseTerritorios() {
  * Monta objetos novos, campo a campo: nenhum campo interno "_..." chega à resposta.
  */
 function projetarTerritoriosParaUsuario(base, progresso, usuarioSolicitante) {
-  const ehAdmin = Boolean(usuarioSolicitante && usuarioSolicitante.perfil === "ADMIN");
+  const veGestao = temPermissao(usuarioSolicitante, "gestao.visualizar");
+  const veEmail = temPermissao(usuarioSolicitante, "usuarios.verEmail");
+  const veEnderecosPontos = temPermissao(usuarioSolicitante, "pontos.verEnderecos");
   const emailUsuario = usuarioSolicitante ? String(usuarioSolicitante.email || "") : "";
   const nomeUsuario = usuarioSolicitante ? String(usuarioSolicitante.nome || "").toLowerCase() : "";
   const emailSolicitante = emailUsuario.toLowerCase();
-  const podeVerNomesHistorico = ehAdmin || lerPropriedade("EXPOR_NOMES_HISTORICO", "false") === "true";
+  const podeVerNomesHistorico = veGestao || lerPropriedade("EXPOR_NOMES_HISTORICO", "false") === "true";
   const predios = (progresso && progresso.predios) || {};
   const quadras = (progresso && progresso.quadras) || {};
 
@@ -1242,7 +1303,7 @@ function projetarTerritoriosParaUsuario(base, progresso, usuarioSolicitante) {
     const listaPredios = predios[String(t.numero)] || [];
     const listaPontos = ((progresso && progresso.pontos) || {})[String(t.numero)] || [];
     // LGPD: endereços das casas só para quem está com o cartão (ou ADMIN); os demais veem só a contagem
-    const vePontos = ehAdmin || emMinhaPosse;
+    const vePontos = veEnderecosPontos || emMinhaPosse;
 
     return {
       numero: t.numero,
@@ -1252,8 +1313,8 @@ function projetarTerritoriosParaUsuario(base, progresso, usuarioSolicitante) {
       statusReal: t.statusReal,
       ultimaAcao: t.ultimaAcao,
       ultimaData: t.ultimaData,
-      dirigente: ehAdmin || ocupado ? t._dirigente : "",
-      emailDirigente: ehAdmin ? t._emailPosse : "",
+      dirigente: veGestao || ocupado ? t._dirigente : "",
+      emailDirigente: veEmail ? t._emailPosse : "",
       emMinhaPosse: emMinhaPosse,
       nomePdf: t.nomePdf,
       wkt: t.wkt,
@@ -1274,7 +1335,7 @@ function projetarTerritoriosParaUsuario(base, progresso, usuarioSolicitante) {
  */
 function montarVersaoListagem(versaoBase, versaoProgresso, usuario) {
   const visao = [
-    usuario && usuario.perfil === "ADMIN" ? "A" : "P",
+    normalizarPerfil(usuario && usuario.perfil).charAt(0),
     lerPropriedade("EXPOR_NOMES_HISTORICO", "false") === "true" ? "N" : "",
     resumirConteudo(String((usuario && usuario.email) || "").toLowerCase() + "|" + String((usuario && usuario.nome) || "").toLowerCase())
   ].join("");
@@ -1445,7 +1506,7 @@ function solicitarTerritorioTransacional(usuario, payload) {
   }
 
   // Regra da Fila Top 5 validada NO SERVIDOR (antes existia só no frontend e podia ser contornada via fetch)
-  if (usuario.perfil !== "ADMIN") {
+  if (!temPermissao(usuario, "territorios.foraDaFila")) {
     const elegiveis = calcularNumerosElegiveisFila(todos);
     const foraDaFila = selecionados.filter(t => !elegiveis.has(String(t.numero)));
     if (foraDaFila.length > 0) {
@@ -1571,12 +1632,12 @@ function devolverTerritorioTransacional(usuario, payload) {
     });
   }
 
-  if (usuario.perfil !== "ADMIN" && !territorio.emMinhaPosse) {
+  if (!territorio.emMinhaPosse && !temPermissao(usuario, "territorios.devolverAlheio")) {
     registrarAuditoria("DEVOLVER_TERRITORIO_ALHEIO", usuario.nome, usuario.email, num, "NEGADO", `Pertence a ${territorio.dirigente}`);
     return respostaJson({
       sucesso: false,
       codigo: 403,
-      erro: `Operação negada: o território ${num} consta em posse de ${territorio.dirigente}. Apenas o próprio dirigente ou um Administrador pode devolvê-lo.`
+      erro: `Operação negada: o território ${num} consta em posse de ${territorio.dirigente}. Apenas o próprio dirigente, um Supervisor ou um Administrador pode devolvê-lo.`
     });
   }
 
@@ -1936,6 +1997,17 @@ function obterIndicadoresAdmin(usuarioAdmin) {
   };
 }
 
+/** Quantos ADMIN ativos restam na aba Usuarios, desconsiderando o e-mail informado. */
+function contarAdminsAtivos(dados, exceto) {
+  let n = 0;
+  for (let i = 1; i < dados.length; i++) {
+    const email = String(dados[i][2] || "").toLowerCase().trim();
+    if (!email || email === exceto) continue;
+    if (normalizarPerfil(dados[i][3]) === "ADMIN" && String(dados[i][4] || "ATIVO").toUpperCase().trim() === "ATIVO") n++;
+  }
+  return n;
+}
+
 function listarTodosUsuariosAdmin() {
   inicializarAbasSegurancaSeNecessario();
   const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("Usuarios");
@@ -1948,7 +2020,7 @@ function listarTodosUsuariosAdmin() {
       id: String(dados[i][0] || ""),
       nome: String(dados[i][1] || ""),
       email: String(dados[i][2] || "").toLowerCase().trim(),
-      perfil: String(dados[i][3] || "PUBLICADOR").toUpperCase().trim(),
+      perfil: normalizarPerfil(dados[i][3]),
       status: String(dados[i][4] || "ATIVO").toUpperCase().trim(),
       criadoEm: dados[i][5] ? String(dados[i][5]) : "",
       ultimoAcesso: dados[i][7] ? String(dados[i][7]) : "",
@@ -1972,10 +2044,11 @@ function salvarOuAlterarUsuarioAdmin(adminExecutor, dadosUsuario) {
   if (nomeAlvo.length < 3 || nomeAlvo.length > 80 || /[<>]/.test(nomeAlvo) || /^[=+\-@]/.test(nomeAlvo)) {
     return respostaJson({ sucesso: false, codigo: 400, erro: "O nome deve ter entre 3 e 80 caracteres, sem os símbolos < > e sem iniciar com = + - @." });
   }
-  const perfilAlvo = String(dadosUsuario.perfil || "PUBLICADOR").toUpperCase().trim() === "ADMIN" ? "ADMIN" : "PUBLICADOR";
+  const perfilAlvo = normalizarPerfil(dadosUsuario.perfil);
   const statusAlvo = String(dadosUsuario.status || "ATIVO").toUpperCase().trim() === "INATIVO" ? "INATIVO" : "ATIVO";
+  const forcar = dadosUsuario.forcar === true;
 
-  // Impede que o último administrador raiz inative a si mesmo acidentalmente
+  // Impede que o administrador remova o próprio acesso acidentalmente
   if (emailAlvo === adminExecutor.email && (statusAlvo !== "ATIVO" || perfilAlvo !== "ADMIN")) {
     return respostaJson({ sucesso: false, codigo: 400, erro: "Você não pode remover seu próprio acesso de Administrador ativo." });
   }
@@ -1987,6 +2060,42 @@ function salvarOuAlterarUsuarioAdmin(adminExecutor, dadosUsuario) {
   for (let i = 1; i < dados.length; i++) {
     const emailLinha = String(dados[i][2] || "").toLowerCase().trim();
     if (emailLinha === emailAlvo) {
+      const perfilAntes = normalizarPerfil(dados[i][3]);
+      const statusAntes = String(dados[i][4] || "ATIVO").toUpperCase().trim();
+      const perdeAdmin = perfilAntes === "ADMIN" && statusAntes === "ATIVO" && (perfilAlvo !== "ADMIN" || statusAlvo !== "ATIVO");
+
+      // Spec 02 / Q8: o admin raiz é intocável e sempre resta ao menos 1 ADMIN ativo
+      const raiz = String(CONFIG.ADMIN_ROOT_EMAIL || "").toLowerCase().trim();
+      if (perdeAdmin && emailAlvo === raiz) {
+        return respostaJson({ sucesso: false, codigo: 400, erro: "O administrador principal do sistema não pode ser rebaixado nem inativado." });
+      }
+      if (perdeAdmin && contarAdminsAtivos(dados, emailAlvo) === 0) {
+        return respostaJson({ sucesso: false, codigo: 400, erro: "É preciso manter pelo menos um Administrador ativo." });
+      }
+
+      // Spec 02 / Q9: inativar quem está com cartões em campo exige confirmação; confirmado, devolve
+      const devolvidos = [];
+      if (statusAntes === "ATIVO" && statusAlvo === "INATIVO") {
+        const emCampo = listarTodosTerritoriosConsolidados(adminExecutor, { fresco: true })
+          .filter(t => t.statusReal === "OCUPADO" && String(t.emailDirigente || "").toLowerCase() === emailAlvo);
+        if (emCampo.length && !forcar) {
+          return respostaJson({
+            sucesso: false,
+            codigo: 409,
+            confirmacaoNecessaria: true,
+            territorios: emCampo.map(t => ({ numero: t.numero, bairro: t.bairro })),
+            erro: `${nomeAlvo} está com ${emCampo.length} cartão(ões) em campo (${emCampo.map(t => "T-" + t.numero).join(", ")}). Confirme para inativar e devolver esses cartões.`
+          });
+        }
+        for (const t of emCampo) {
+          const r = devolverTerritorioTransacional(adminExecutor, { numeroTerritorio: t.numero, foiCompleto: false, motivoNaoCompleto: "QUADRAS_FALTANTES" });
+          let ok = false;
+          try { ok = JSON.parse(r.getContent()).sucesso === true; } catch (e) {}
+          if (ok) devolvidos.push("T-" + t.numero);
+          registrarAuditoria("DEVOLVER_POR_INATIVACAO", adminExecutor.nome, adminExecutor.email, t.numero, ok ? "SUCESSO" : "ERRO", `Usuário inativado: ${emailAlvo}`);
+        }
+      }
+
       sheet.getRange(i + 1, 2).setValue(sanitizarCelula(nomeAlvo, 80));
       sheet.getRange(i + 1, 4).setValue(perfilAlvo);
       sheet.getRange(i + 1, 5).setValue(statusAlvo);
@@ -1995,8 +2104,13 @@ function salvarOuAlterarUsuarioAdmin(adminExecutor, dadosUsuario) {
       if (statusAlvo === "ATIVO" && liberarEmailBlacklist(emailAlvo, adminExecutor.email)) {
         registrarAuditoria("BLACKLIST_LIBERADO", adminExecutor.nome, adminExecutor.email, "-", "SUCESSO", `Alvo: ${emailAlvo}`);
       }
-      registrarAuditoria("ALTERAR_USUARIO", adminExecutor.nome, adminExecutor.email, "-", "SUCESSO", `Alvo: ${emailAlvo} | Perfil=${perfilAlvo} | Status=${statusAlvo}`);
-      return respostaJson({ sucesso: true, mensagem: `Usuário ${nomeAlvo} (${emailAlvo}) atualizado com sucesso.` });
+      registrarAuditoria("ALTERAR_USUARIO", adminExecutor.nome, adminExecutor.email, "-", "SUCESSO",
+        `Alvo: ${emailAlvo} | Perfil ${perfilAntes}→${perfilAlvo} | Status ${statusAntes}→${statusAlvo}${devolvidos.length ? " | Devolvidos: " + devolvidos.join(", ") : ""}`);
+      return respostaJson({
+        sucesso: true,
+        devolvidos: devolvidos,
+        mensagem: `Usuário ${nomeAlvo} (${emailAlvo}) atualizado com sucesso.${devolvidos.length ? " Cartões devolvidos: " + devolvidos.join(", ") + "." : ""}`
+      });
     }
   }
 
@@ -2029,22 +2143,33 @@ function salvarOuAlterarUsuarioAdmin(adminExecutor, dadosUsuario) {
   return respostaJson({ sucesso: true, mensagem: `Usuário ${nomeAlvo} cadastrado na Whitelist com sucesso!` });
 }
 
-function listarAuditoriaAdmin(limite) {
+/** Ações de auditoria que dizem respeito a cartões (visão do SUPERVISOR). */
+const REGEX_AUDITORIA_TERRITORIOS = /TERRITORIO|DEVOLVER|SOLICITAR|DESIGNAR|TRANSFERIR|PREDIO|QUADRA|PONTO/;
+const REGEX_EMAIL = /[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}/g;
+
+/**
+ * soTerritorios = true (SUPERVISOR): só ações de cartões, sem e-mails (coluna vazia e e-mails
+ * mascarados no texto dos detalhes) — spec 02 / Q2 e Q4.
+ */
+function listarAuditoriaAdmin(limite, soTerritorios) {
   inicializarAbasSegurancaSeNecessario();
   const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("Auditoria");
   const dados = sheet.getDataRange().getValues();
   const logs = [];
 
   for (let i = dados.length - 1; i >= 1 && logs.length < (limite || 100); i--) {
+    const acao = String(dados[i][4] || "");
+    if (soTerritorios && !REGEX_AUDITORIA_TERRITORIOS.test(acao)) continue;
+    const detalhes = String(dados[i][7] || "");
     logs.push({
       idOperacao: String(dados[i][0] || ""),
       dataHora: dados[i][1] ? Utilities.formatDate(new Date(dados[i][1]), Session.getScriptTimeZone(), "dd/MM/yyyy HH:mm:ss") : "",
       usuario: String(dados[i][2] || ""),
-      email: String(dados[i][3] || ""),
-      acao: String(dados[i][4] || ""),
+      email: soTerritorios ? "" : String(dados[i][3] || ""),
+      acao: acao,
       territorio: String(dados[i][5] || ""),
       resultado: String(dados[i][6] || ""),
-      detalhes: String(dados[i][7] || "")
+      detalhes: soTerritorios ? detalhes.replace(REGEX_EMAIL, "[e-mail]") : detalhes
     });
   }
   return logs;
@@ -2413,7 +2538,7 @@ function alternarPredioTrabalhadoTransacional(usuario, payload) {
     return respostaJson({ sucesso: false, codigo: 404, erro: "Território não encontrado." });
   }
 
-  if (usuario.perfil !== "ADMIN" && (!territorio.emMinhaPosse || territorio.statusReal !== "OCUPADO")) {
+  if (!temPermissao(usuario, "progresso.alheio") && (!territorio.emMinhaPosse || territorio.statusReal !== "OCUPADO")) {
     return respostaJson({
       sucesso: false,
       codigo: 403,
@@ -2665,7 +2790,7 @@ function validarPosseParaProgresso(usuario, numTerr) {
   if (!territorio) {
     return { erro: respostaJson({ sucesso: false, codigo: 404, erro: "Território não encontrado." }) };
   }
-  if (territorio.statusReal !== "OCUPADO" || (usuario.perfil !== "ADMIN" && !territorio.emMinhaPosse)) {
+  if (territorio.statusReal !== "OCUPADO" || (!temPermissao(usuario, "progresso.alheio") && !territorio.emMinhaPosse)) {
     return {
       erro: respostaJson({
         sucesso: false,
@@ -2891,7 +3016,7 @@ function sugerirCadastroPredioTransacional(usuario, payload) {
     return respostaJson({ sucesso: false, codigo: 409, erro: "O cadastro deste prédio já tem esses números." });
   }
 
-  const ehAdmin = usuario.perfil === "ADMIN";
+  const ehAdmin = temPermissao(usuario, "predios.revisar");
   const abaRev = obterAbaRevisoesPredios(ss, true);
   const revs = abaRev.getDataRange().getValues();
   // Uma sugestão pendente por prédio: a nova substitui as anteriores
