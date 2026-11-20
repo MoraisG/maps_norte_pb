@@ -19,6 +19,7 @@ const os = require("os");
 const path = require("path");
 const Geo = require("../../js/geo.js");
 const Osm = require("../lib/overpass.js");
+const Ajustes = require("./ajustes.js");
 
 const RAIZ = path.resolve(__dirname, "..", "..");
 
@@ -402,7 +403,9 @@ async function principal() {
   if (!op.renumerar && fs.existsSync(op.saida)) {
     try {
       for (const f of JSON.parse(fs.readFileSync(op.saida, "utf8")).features) {
-        anteriores.set(`${f.properties.NUM_TERR}|${f.properties.ID_QUADRA}`, Number(f.properties.NUM_QUADRA));
+        // Número que o GERADOR deu (_GER), não o ajustado à mão: os ajustes são reaplicados no fim
+        const n = f.properties._GER ? f.properties._GER.n : f.properties.NUM_QUADRA;
+        anteriores.set(`${f.properties.NUM_TERR}|${f.properties.ID_QUADRA}`, Number(n));
       }
     } catch (e) { console.warn("Aviso: quadras.geojson existente ilegível; numerando do zero."); }
   }
@@ -508,6 +511,14 @@ async function principal() {
   for (const a of alertas) console.log(`  ${String(a.numero).padStart(3)}: ${a.motivos.join("; ")}`);
 
   // ------------------------------------------------------------------ saída
+  // Ajustes manuais (spec 05): scripts/quadras/ajustes-quadras.json
+  const ajustados = Ajustes.aplicarAjustes(features, Ajustes.lerAjustes());
+  if (ajustados.aplicados || ajustados.avisos.length) {
+    console.log(`\nAjustes manuais aplicados: ${ajustados.aplicados}`);
+    for (const a of ajustados.avisos) console.log("  Aviso: " + a);
+  }
+  features.splice(0, features.length, ...ajustados.features);
+
   if (!op.semGravar) {
     const colecao = {
       type: "FeatureCollection",
@@ -516,8 +527,7 @@ async function principal() {
       fonte: "Geometria derivada de © OpenStreetMap contributors (ODbL) — gerado por scripts/quadras/gerar-quadras.js",
       features
     };
-    const texto = "{\n" + Object.entries(colecao).filter(([k]) => k !== "features").map(([k, v]) => `${JSON.stringify(k)}: ${JSON.stringify(v)}`).join(",\n") +
-      ',\n"features": [\n' + features.map(f => JSON.stringify(f)).join(",\n") + "\n]\n}\n";
+    const texto = Ajustes.serializarColecao(colecao);
     fs.writeFileSync(op.saida, texto);
     console.log(`\nGravado: ${op.saida} (${features.length} quadras, ${(texto.length / 1024).toFixed(0)} KB)`);
   }

@@ -1,0 +1,4 @@
+{
+  "comentario": "Ajustes manuais de quadras (spec 05). Edite com: node scripts/quadras/ajustar-quadras.js --ajuda",
+  "ajustes": {}
+}

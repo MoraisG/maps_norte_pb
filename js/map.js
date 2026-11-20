@@ -33,7 +33,7 @@ const MapaTerritorios = {
   CHAVE_ESRI: "",
   FALHAS_SATELITE_PARA_DESISTIR: 4,
   ZOOM_MIN_DETALHES: 15,          // quadras numeradas e pinos de prédios só a partir deste zoom
-  VERSAO_QUADRAS_GEO: 30,         // manter igual à VERSAO de sw.js (vale também para vias-rurais.geojson)
+  VERSAO_QUADRAS_GEO: 31,         // manter igual à VERSAO de sw.js (vale também para vias-rurais.geojson)
   ZOOM_MIN_NOMES_VIAS: 14,        // nomes das estradas rurais só a partir deste zoom
   ATRIBUICAO_OSM: '&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener noreferrer">OpenStreetMap</a> contributors',
   _localizacao: new Map(),        // mapa -> estado do "minha posição" (GPS)
@@ -700,6 +700,7 @@ const MapaTerritorios = {
           const indice = new Map();
           for (const f of geo.features || []) {
             const p = f.properties || {};
+            if (p.OCULTA) continue;   // spec 05: quadra ocultada em scripts/quadras/ajustes-quadras.json
             const g = f.geometry || {};
             const poligonos = g.type === "Polygon" ? [g.coordinates] : (g.type === "MultiPolygon" ? g.coordinates : []);
             const partes = poligonos.map(pol => pol.map(anel => anel.map(c => [c[1], c[0]])));
