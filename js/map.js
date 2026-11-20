@@ -33,7 +33,7 @@ const MapaTerritorios = {
   CHAVE_ESRI: "",
   FALHAS_SATELITE_PARA_DESISTIR: 4,
   ZOOM_MIN_DETALHES: 15,          // quadras numeradas e pinos de prédios só a partir deste zoom
-  VERSAO_QUADRAS_GEO: 28,         // manter igual à VERSAO de sw.js (vale também para vias-rurais.geojson)
+  VERSAO_QUADRAS_GEO: 29,         // manter igual à VERSAO de sw.js (vale também para vias-rurais.geojson)
   ZOOM_MIN_NOMES_VIAS: 14,        // nomes das estradas rurais só a partir deste zoom
   ATRIBUICAO_OSM: '&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener noreferrer">OpenStreetMap</a> contributors',
   _localizacao: new Map(),        // mapa -> estado do "minha posição" (GPS)
@@ -233,7 +233,7 @@ const MapaTerritorios = {
 
   /**
    * Endereços dos ladrilhos de satélite (foto + nomes de vias), conforme haja ou não chave da Esri.
-   * Fonte única para as camadas do mapa e para o pacote offline (js/pacote-offline.js).
+   * Fonte única para as camadas de satélite do mapa.
    * ladrilho512: ladrilhos de 512 px pedidos um nível de zoom abaixo do zoom do mapa.
    */
   modelosSatelite() {
@@ -270,24 +270,6 @@ const MapaTerritorios = {
   },
 
   /**
-   * Sem internet, o satélite só existe até o zoom baixado no pacote. Limita o zoom nativo das
-   * camadas de satélite a esse valor (acima dele o Leaflet amplia a imagem do pacote em vez de
-   * pedir ladrilhos que não existem). zoomMax = null devolve os valores originais.
-   */
-  ajustarZoomSatelite(map, zoomMax) {
-    const item = this._mapasComCamadas.find(m => m.map === map);
-    const grupo = item && item.camadas["Satélite"];
-    if (!grupo) return;
-    grupo.eachLayer(camada => {
-      if (camada._zoomNativoOriginal === undefined) camada._zoomNativoOriginal = camada.options.maxNativeZoom;
-      const novo = zoomMax ? Math.min(camada._zoomNativoOriginal, zoomMax) : camada._zoomNativoOriginal;
-      if (camada.options.maxNativeZoom === novo) return;
-      camada.options.maxNativeZoom = novo;
-      if (map.hasLayer(camada)) camada.redraw();
-    });
-  },
-
-  /**
    * Recebe a chave da Esri entregue pelo backend. Se mudou, recria as camadas de satélite dos
    * mapas já abertos (o grupo "Satélite" é o mesmo; só o conteúdo é trocado).
    */
@@ -319,7 +301,7 @@ const MapaTerritorios = {
     let falhasSeguidas = 0;
     imagem.on("tileload", () => { falhasSeguidas = 0; });
     imagem.on("tileerror", () => {
-      // Sem rede, ladrilho faltando é esperado (só existe o que foi baixado no pacote offline)
+      // Sem rede, ladrilho faltando é esperado: não troca o fundo nem avisa
       if (navigator.onLine === false) return;
       falhasSeguidas++;
       if (falhasSeguidas < this.FALHAS_SATELITE_PARA_DESISTIR || !map.hasLayer(grupo)) return;
@@ -452,62 +434,6 @@ const MapaTerritorios = {
    * PACOTE OFFLINE (mapa de satélite do território rural sem internet)
    * ==========================================================================
    */
-  limitesTerritorio(numero) {
-    const item = this.obterGeometrias().itens.get(Number(numero));
-    if (!item) return null;
-    const b = item.limites;
-    return { sul: b.getSouth(), oeste: b.getWest(), norte: b.getNorth(), leste: b.getEast() };
-  },
-
-  renderizarBarraOffline() {
-    const barra = document.getElementById("modal-offline-barra");
-    if (!barra) return;
-    const t = App.territorios.find(item => Number(item.numero) === this.territorioModalAtual);
-    const num = t ? Number(t.numero) : 0;
-    const info = t ? PacoteOffline.info(num) : null;
-    const progresso = t ? PacoteOffline.progresso(num) : null;
-    // Oferecido só para território rural que está com o usuário; pacote já baixado sempre aparece (para remover)
-    const podeBaixar = Boolean(t && PacoteOffline.permitido && this.ehRural(t) && t.emMinhaPosse);
-    if (!t || (!podeBaixar && !info && !progresso)) {
-      barra.hidden = true;
-      barra.innerHTML = "";
-      return;
-    }
-    barra.hidden = false;
-
-    if (progresso) {
-      const pct = progresso.total ? Math.round(progresso.feitos / progresso.total * 100) : 0;
-      barra.innerHTML = `
-        <div class="barra-offline-texto">
-          <strong>Baixando mapa de satélite… ${pct}%</strong>
-          <div class="barra-offline-progresso" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${pct}"><span style="width:${pct}%"></span></div>
-        </div>
-        <button type="button" data-acao="offline-cancelar" data-num="${num}" class="barra-offline-botao secundario">Cancelar</button>`;
-      return;
-    }
-
-    if (info) {
-      const quando = new Date(info.baixadoEm).toLocaleDateString("pt-BR");
-      const situacao = info.completo
-        ? `Disponível sem internet (baixado em ${quando})`
-        : `Baixado em parte em ${quando} — ${info.falhas} imagem(ns) faltando`;
-      barra.innerHTML = `
-        <div class="barra-offline-texto"><strong>${info.completo ? "✓" : "⚠"} ${Utils.escapeHtml(situacao)}</strong></div>
-        ${!info.completo && podeBaixar ? `<button type="button" data-acao="offline-baixar" data-num="${num}" class="barra-offline-botao">Completar</button>` : ""}
-        <button type="button" data-acao="offline-remover" data-num="${num}" class="barra-offline-botao secundario">Remover</button>`;
-      return;
-    }
-
-    const limites = this.limitesTerritorio(num);
-    const estimativa = limites ? PacoteOffline.estimar(limites, this.modelosSatelite()) : null;
-    barra.innerHTML = `
-      <div class="barra-offline-texto">
-        <strong>Usar este mapa sem internet</strong>
-        <span>Baixa as imagens de satélite deste território para o aparelho${estimativa ? ` (cerca de ${estimativa.megabytes} MB)` : ""}.</span>
-      </div>
-      <button type="button" data-acao="offline-baixar" data-num="${num}" class="barra-offline-botao">Baixar</button>`;
-  },
-
   criarControleNorte() {
     const Controle = L.Control.extend({
       options: { position: "topleft" },
@@ -1283,12 +1209,6 @@ const MapaTerritorios = {
     this.renderizarPontosRuraisModal(t);
     this.atualizarRotulos(this.modalMap, this._rotulosModal);
 
-    this.renderizarBarraOffline();
-    // Sem rede e com o pacote baixado: abre direto no satélite (é o que existe no aparelho),
-    // limitado ao zoom que foi baixado
-    const pacote = navigator.onLine === false ? PacoteOffline.info(t.numero) : null;
-    if (pacote) this.usarCamadaBase(this.modalMap, "Satélite");
-    this.ajustarZoomSatelite(this.modalMap, pacote ? (pacote.zoomMax || PacoteOffline.ZOOM_MAX) : null);
 
     const limitesCartao = poly.getBounds();
     clearTimeout(this._modalTimer);

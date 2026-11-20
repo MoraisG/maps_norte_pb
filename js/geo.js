@@ -303,7 +303,7 @@ const Geo = {
    */
   /**
    * Ladrilhos de mapa (z, x, y no esquema XYZ/Web Mercator) que cobrem um retângulo de
-   * coordenadas, com margem em metros, para cada zoom pedido. Usado pelo pacote offline.
+   * coordenadas, com margem em metros, para cada zoom pedido.
    * limites = { sul, oeste, norte, leste } em graus.
    */
   ladrilhosDaArea(limites, zooms, margemMetros = 0) {
