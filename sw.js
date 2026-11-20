@@ -9,7 +9,7 @@
  * - Ladrilhos de mapa (outras origens) seguem direto para a rede. O antigo pacote offline de
  *   satélite foi removido (spec 07 / Q9): no campo sem sinal valem as estradas e casas em vetor.
  */
-const VERSAO = 30;
+const VERSAO = 31;
 const PREFIXO_CACHE = "territorios-pwa-shell-";
 const PREFIXO_PACOTE_ANTIGO = "territorios-tiles-";   // caches do pacote de satélite removido: apagados na ativação
 const CACHE_NAME = `${PREFIXO_CACHE}v${VERSAO}`;
