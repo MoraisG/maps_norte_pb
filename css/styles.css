@@ -1190,6 +1190,26 @@ input.campo-invalido:focus {
   align-items: center;
   gap: 0.375rem;
 }
+.cp-proxima {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.375rem;
+  margin-top: 0.25rem;
+  padding-top: 0.25rem;
+  border-top: 1px solid #e2e8f0;
+}
+.cp-proxima[hidden] {
+  display: none;
+}
+.cp-botao {
+  padding: 0.125rem 0.5rem;
+  border-radius: 9999px;
+  background: #d3e3fd;
+  color: #041e49;
+  font-weight: 600;
+  font-size: 0.6875rem;
+}
 .cp-cor {
   display: inline-block;
   width: 0.625rem;
