@@ -120,4 +120,29 @@ assert.strictEqual(r.faces.length, 2);
 assert.strictEqual(r.furos, 1);
 assert.deepStrictEqual(r.faces.map(f => Math.round(f.area)).sort((a, b) => a - b), [10000, 80000]);
 
+// Spec 07 / Fase 3: distância, direção e casa mais próxima
+{
+  // 1 grau de latitude ≈ 111,2 km
+  const d = Geo.distanciaMetros(-26.2, -52.67, -25.2, -52.67);
+  assert.ok(Math.abs(d - 111195) < 50, "1° de latitude ≈ 111,2 km: " + d);
+  assert.strictEqual(Geo.distanciaMetros(-26.2, -52.67, -26.2, -52.67), 0);
+  assert.strictEqual(Geo.direcaoCardeal(-26.2, -52.67, -26.1, -52.67), "norte");
+  assert.strictEqual(Geo.direcaoCardeal(-26.2, -52.67, -26.2, -52.57), "leste");
+  assert.strictEqual(Geo.direcaoCardeal(-26.2, -52.67, -26.3, -52.77), "sudoeste");
+
+  const pontos = [
+    { idPonto: "A", lat: -26.2000, lng: -52.6700, visitadoEm: "2026-11-01" }, // em cima, mas visitada
+    { idPonto: "B", lat: -26.2050, lng: -52.6700 },                             // ~556 m ao sul
+    { idPonto: "C", lat: -26.2000, lng: -52.6600 },                             // ~1 km a leste
+    { idPonto: "X", lat: NaN, lng: -52.67 }                                     // inválido: ignorado
+  ];
+  const r = Geo.pontoMaisProximo(-26.2, -52.67, pontos, p => !p.visitadoEm);
+  assert.strictEqual(r.ponto.idPonto, "B");
+  assert.ok(Math.abs(r.metros - 556) < 5, "distância até B: " + r.metros);
+  assert.strictEqual(r.direcao, "sul");
+  assert.strictEqual(Geo.pontoMaisProximo(-26.2, -52.67, pontos).ponto.idPonto, "A", "sem filtro, a mais próxima é a visitada");
+  assert.strictEqual(Geo.pontoMaisProximo(-26.2, -52.67, [pontos[0]], p => !p.visitadoEm), null, "todas visitadas: null");
+  assert.strictEqual(Geo.pontoMaisProximo(-26.2, -52.67, []), null);
+}
+
 console.log("GEOMETRIA E QUADRAS: TODOS OS TESTES PASSARAM.");

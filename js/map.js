@@ -33,7 +33,7 @@ const MapaTerritorios = {
   CHAVE_ESRI: "",
   FALHAS_SATELITE_PARA_DESISTIR: 4,
   ZOOM_MIN_DETALHES: 15,          // quadras numeradas e pinos de prédios só a partir deste zoom
-  VERSAO_QUADRAS_GEO: 29,         // manter igual à VERSAO de sw.js (vale também para vias-rurais.geojson)
+  VERSAO_QUADRAS_GEO: 30,         // manter igual à VERSAO de sw.js (vale também para vias-rurais.geojson)
   ZOOM_MIN_NOMES_VIAS: 14,        // nomes das estradas rurais só a partir deste zoom
   ATRIBUICAO_OSM: '&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener noreferrer">OpenStreetMap</a> contributors',
   _localizacao: new Map(),        // mapa -> estado do "minha posição" (GPS)
@@ -411,6 +411,10 @@ const MapaTerritorios = {
       estado.marcador.setLatLng(ponto);
     }
     estado.marcador.bringToFront();
+    if (map === this.modalMap) {
+      this._posicaoModal = { lat: ponto[0], lng: ponto[1] };
+      this.atualizarCasaMaisProxima();
+    }
     if (estado.primeira) {
       estado.primeira = false;
       // Só move o mapa se a pessoa estiver fora da área visível
@@ -427,13 +431,45 @@ const MapaTerritorios = {
     if (estado.circulo) map.removeLayer(estado.circulo);
     estado.botao.setAttribute("aria-pressed", "false");
     estado.botao.classList.remove("ativo");
+    if (map === this.modalMap) {
+      this._posicaoModal = null;
+      this.atualizarCasaMaisProxima();
+    }
   },
 
   /**
-   * ==========================================================================
-   * PACOTE OFFLINE (mapa de satélite do território rural sem internet)
-   * ==========================================================================
+   * Spec 07 / Fase 3: com "minha posição" ligada no cartão rural, mostra no quadro das casas a
+   * casa ainda não visitada mais próxima (distância e direção) e um botão que leva até ela.
+   * Tudo no aparelho: a posição não sai da tela.
    */
+  atualizarCasaMaisProxima() {
+    const el = this._elCasaMaisProxima;
+    if (!el) return;
+    const pontos = this._pontosModal || [];
+    if (!this._posicaoModal || !pontos.length) {
+      el.hidden = true;
+      el.innerHTML = "";
+      return;
+    }
+    const { lat, lng } = this._posicaoModal;
+    const achado = Geo.pontoMaisProximo(lat, lng, pontos, p => !p.visitadoEm);
+    el.hidden = false;
+    if (!achado) {
+      el.innerHTML = `<span>✓ Todas as casas deste cartão já foram visitadas.</span>`;
+      return;
+    }
+    const m = achado.metros;
+    const distancia = m < 1000 ? `${Math.max(10, Math.round(m / 10) * 10)} m` : `${(m / 1000).toFixed(1).replace(".", ",")} km`;
+    el.innerHTML = `<span>📍 Próxima a visitar: <strong>${distancia}</strong> ${achado.direcao === "leste" || achado.direcao === "oeste" ? "a" : "ao"} ${achado.direcao}</span>
+      <button type="button" class="cp-botao">Mostrar</button>`;
+    el.querySelector(".cp-botao").addEventListener("click", () => {
+      const marcador = this._marcadoresPontos && this._marcadoresPontos.get(achado.ponto.idPonto);
+      if (!marcador || !this.modalMap) return;
+      this.modalMap.panTo(marcador.getLatLng());
+      marcador.openPopup();
+    });
+  },
+
   criarControleNorte() {
     const Controle = L.Control.extend({
       options: { position: "topleft" },
@@ -563,10 +599,14 @@ const MapaTerritorios = {
     if (!this.modalPontosRuraisLayer) return;
     this.modalPontosRuraisLayer.clearLayers();
     if (this._controlePontos) { this._controlePontos.remove(); this._controlePontos = null; }
+    this._marcadoresPontos = new Map();
+    this._pontosModal = [];
+    this._elCasaMaisProxima = null;
     if (!t) return;
     const pontos = Array.isArray(t.pontosRurais) ? t.pontosRurais : [];
     const total = Number(t.totalPontosRurais) || pontos.length;
     if (!total) return;
+    this._pontosModal = pontos;
 
     const podeMarcar = t.statusReal === "OCUPADO" && (t.emMinhaPosse || App.pode("progresso.alheio"));
     for (const p of pontos) {
@@ -581,6 +621,7 @@ const MapaTerritorios = {
       });
       marcador.bindPopup(() => this.htmlPopupPonto(t, p, podeMarcar), { className: "popup-ponto", maxWidth: 260 });
       this.modalPontosRuraisLayer.addLayer(marcador);
+      if (p.idPonto) this._marcadoresPontos.set(p.idPonto, marcador);
     }
 
     const visitados = pontos.length ? pontos.filter(p => p.visitadoEm).length : (Number(t.pontosRuraisVisitados) || 0);
@@ -593,11 +634,17 @@ const MapaTerritorios = {
              <span class="cp-item"><i class="cp-cor" style="background:${this.COR_PONTO_VISITADO}"></i>Visitada</span>
              <b>🏠 ${visitados} de ${pontos.length} casas visitadas</b>`
           : `<b>🏠 ${visitados} de ${total} casas visitadas</b><span>Endereços visíveis para quem estiver com o cartão.</span>`;
+        if (pontos.length) {
+          const proxima = L.DomUtil.create("div", "cp-proxima", el);
+          proxima.hidden = true;
+          this._elCasaMaisProxima = proxima;
+        }
         L.DomEvent.disableClickPropagation(el);
         return el;
       }
     });
     this._controlePontos = new Controle().addTo(this.modalMap);
+    this.atualizarCasaMaisProxima();
   },
 
   htmlPopupPonto(t, p, podeMarcar) {

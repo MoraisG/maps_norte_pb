@@ -342,6 +342,38 @@ const Geo = {
       h = Math.imul(h, 0x01000193) >>> 0;
     }
     return "Q" + h.toString(36).toUpperCase().padStart(7, "0");
+  },
+
+  /** Distância em metros entre dois pontos (haversine, raio médio da Terra). */
+  distanciaMetros(lat1, lng1, lat2, lng2) {
+    const R = 6371008.8, rad = Math.PI / 180;
+    const dLat = (lat2 - lat1) * rad, dLng = (lng2 - lng1) * rad;
+    const a = Math.sin(dLat / 2) ** 2 + Math.cos(lat1 * rad) * Math.cos(lat2 * rad) * Math.sin(dLng / 2) ** 2;
+    return 2 * R * Math.asin(Math.min(1, Math.sqrt(a)));
+  },
+
+  /** Direção aproximada (8 pontos cardeais, em português) de (lat1,lng1) para (lat2,lng2). */
+  direcaoCardeal(lat1, lng1, lat2, lng2) {
+    const rad = Math.PI / 180;
+    const y = Math.sin((lng2 - lng1) * rad) * Math.cos(lat2 * rad);
+    const x = Math.cos(lat1 * rad) * Math.sin(lat2 * rad) - Math.sin(lat1 * rad) * Math.cos(lat2 * rad) * Math.cos((lng2 - lng1) * rad);
+    const graus = (Math.atan2(y, x) / rad + 360) % 360;
+    return ["norte", "nordeste", "leste", "sudeste", "sul", "sudoeste", "oeste", "noroeste"][Math.round(graus / 45) % 8];
+  },
+
+  /**
+   * Spec 07 / Fase 3: ponto mais próximo de (lat, lng) entre os que passam no filtro.
+   * pontos = [{ lat, lng, ... }]. Devolve { ponto, metros, direcao } ou null.
+   */
+  pontoMaisProximo(lat, lng, pontos, filtro) {
+    let melhor = null;
+    for (const p of pontos || []) {
+      if (!p || !isFinite(p.lat) || !isFinite(p.lng) || (filtro && !filtro(p))) continue;
+      const metros = Geo.distanciaMetros(lat, lng, p.lat, p.lng);
+      if (!melhor || metros < melhor.metros) melhor = { ponto: p, metros };
+    }
+    if (melhor) melhor.direcao = Geo.direcaoCardeal(lat, lng, melhor.ponto.lat, melhor.ponto.lng);
+    return melhor;
   }
 };
 
